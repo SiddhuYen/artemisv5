@@ -70,7 +70,16 @@ class ClaudeClient:
             try:
                 from anthropic import AsyncAnthropic
 
-                self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+                # Explicit timeout. The SDK default is 10 minutes and this code
+                # retries three times, so one stuck request buys up to half an
+                # hour of total silence — which is exactly what it looked like:
+                # a live job, 0.1% CPU, no log line for eight minutes, and a
+                # budget counter three calls ahead of the completions.
+                self._client = AsyncAnthropic(
+                    api_key=settings.anthropic_api_key,
+                    timeout=settings.claude_timeout_s,
+                    max_retries=0,  # this module does its own bounded retrying
+                )
             except Exception as exc:  # pragma: no cover - import/config failure
                 self.log.warn("claude.unavailable", f"{type(exc).__name__}: {exc}")
                 self._client = None
@@ -220,13 +229,21 @@ class ClaudeClient:
                 anchor_names=anchors,
                 first_index=lead,
             )
+            # Anchors are deliberately NOT in the cache key. They are a recall
+            # hint the prompt explicitly says licenses nothing, so the same page
+            # yields materially the same extractions whoever we arrived via —
+            # but including them meant Wikipedia's Larry Ellison page paid for a
+            # fresh extraction once per anchor set that reached it.
+            #
+            # Safe because anchors are re-applied at *grounding* time, not read
+            # from the cache: co-listing still gates on the current anchor, so a
+            # cached roster is only admitted for someone actually listed on it.
             key = "|".join(
                 [
                     prompts.PROMPT_VERSION,
                     self.s.extraction_model,
                     page.text_sha256,
                     str(lead),
-                    ",".join(anchors),
                 ]
             )
             data = await self._call_json(

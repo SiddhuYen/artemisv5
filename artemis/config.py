@@ -51,8 +51,13 @@ class Settings(BaseSettings):
     extraction_effort: str = "low"
     # Pivot verification runs on a handful of interior nodes at return time.
     verification_model: str = "claude-opus-5"
-    # Borderline merge adjudication (ladder rungs 3 and 4) — same tier as pivot.
-    identity_model: str = "claude-opus-5"
+    # Borderline merge adjudication (ladder rungs 3 and 4). High volume — one
+    # per borderline pair, hundreds per job — so it belongs on the fast model
+    # alongside extraction, not on the pivot tier. It can only ever veto, and
+    # the ranked ladder above it is code, not model judgement.
+    identity_model: str = "claude-haiku-4-5"
+    #: Per-request ceiling. Anything slower is a stall, not a slow answer.
+    claude_timeout_s: float = 90.0
     extraction_max_tokens: int = 16000
     verification_max_tokens: int = 4000
     strategy_enabled: bool = True
@@ -75,6 +80,11 @@ class Settings(BaseSettings):
     fetch_max_retries: int = 2
     fetch_max_bytes: int = 3_000_000
     respect_robots: bool = True
+    #: Skip hosts that never serve a usable page, before spending budget, a
+    #: robots.txt round trip, or a per-domain delay on them.
+    use_default_blocklist: bool = True
+    #: Comma-separated additions, e.g. "example.com,foo.co.uk".
+    blocked_domains_extra: str = ""
 
     # --- extraction --------------------------------------------------------
     context_window_sentences: int = 3

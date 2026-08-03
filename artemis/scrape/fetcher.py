@@ -29,6 +29,31 @@ _BINARY_SUFFIXES = (
 )
 _RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
+#: Hosts that never yield a usable page, so every attempt costs a robots.txt
+#: request, a per-domain delay, and a fetch slot for nothing. Measured, not
+#: guessed: across this session's runs linkedin.com wasted 19 attempts,
+#: facebook.com 19, instagram.com 18, podcasters.spotify.com 17.
+#:
+#: Deliberately limited to structurally hostile hosts — social networks, contact
+#: scrapers, and podcast hosts that refuse crawlers. Corporate sites with strict
+#: robots (oracle.com) are NOT here: they block some paths and serve others, and
+#: a blocklist entry is permanent while a robots rule is per-path.
+DEFAULT_BLOCKED_DOMAINS = frozenset({
+    # Social — robots-disallowed to crawlers, and login-walled besides
+    "linkedin.com", "facebook.com", "instagram.com", "threads.net",
+    "x.com", "twitter.com", "tiktok.com", "pinterest.com", "reddit.com",
+    "quora.com", "youtube.com",
+    # Contact/lead scrapers — no relationship prose, often paywalled
+    "rocketreach.co", "zoominfo.com", "signalhire.com", "lusha.com",
+    "apollo.io", "contactout.com", "leadiq.com", "hunter.io",
+    # Aggregators that block or render nothing useful
+    "crunchbase.com", "tracxn.com", "glassdoor.com", "indeed.com",
+    "academia.edu", "researchgate.net", "scribd.com",
+    # Podcast hosts observed refusing crawlers (others — omny.fm, acast,
+    # spreaker, podcasts.apple.com — do serve, so they stay off this list)
+    "podcasters.spotify.com", "redcircle.com", "anchor.fm",
+})
+
 
 @dataclass
 class FetchOutcome:
@@ -62,6 +87,19 @@ class Fetcher:
         self._domain_last: dict[str, float] = {}
         self._robots: dict[str, Optional[RobotFileParser]] = {}
         self._robots_lock = asyncio.Lock()
+        self.blocked_domains = frozenset(
+            (DEFAULT_BLOCKED_DOMAINS if settings.use_default_blocklist else frozenset())
+            | {d.strip().lower() for d in settings.blocked_domains_extra.split(",") if d.strip()}
+        )
+        self.blocked_skips = 0
+
+    def _is_blocked(self, url: str) -> bool:
+        """Host, or any parent domain, on the blocklist (so in.linkedin.com too)."""
+        host = urlparse(url).netloc.lower().split(":")[0].removeprefix("www.")
+        parts = host.split(".")
+        return any(
+            ".".join(parts[i:]) in self.blocked_domains for i in range(len(parts) - 1)
+        )
 
     # -- lifecycle ----------------------------------------------------------
     async def __aenter__(self) -> "Fetcher":
@@ -135,6 +173,12 @@ class Fetcher:
     async def fetch(self, url: str) -> FetchOutcome:
         if any(urlparse(url).path.lower().endswith(sfx) for sfx in _BINARY_SUFFIXES):
             return FetchOutcome(url, reason="binary")
+
+        # Checked before everything else: no budget, no robots.txt round trip,
+        # no per-domain delay spent on a host that has never served us a page.
+        if self._is_blocked(url):
+            self.blocked_skips += 1
+            return FetchOutcome(url, reason="blocked_domain")
 
         cached = await self.cache.get("fetch", url)
         if cached is not None:
