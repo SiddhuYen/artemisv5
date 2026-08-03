@@ -279,8 +279,29 @@ _ORG_NAME_MARKERS = frozenset(
         "pictures", "films", "film", "entertainment", "productions",
         "production", "studios", "broadcasting", "television", "pictures.",
         "animation", "interactive", "sports", "athletics", "club", "team",
+        # Descriptor phrases the extractor sometimes returns as a name:
+        # "715 Restaurant employee" entered the graph as a person.
+        "employee", "employees", "staff", "spokesman", "spokeswoman",
+        "spokesperson", "official", "officials", "representative",
+        "representatives", "resident", "residents", "restaurant", "cafe",
+        "hotel", "grill", "kitchen", "bakery", "brewery", "winery",
     }
 )
+
+
+#: Function words that appear in titles and descriptions but never inside a
+#: personal name. Name particles (van, de, von, della, bin, …) are deliberately
+#: absent — those are legitimate, and live in _PARTICLES.
+_FUNCTION_WORDS = frozenset({
+    "in", "a", "an", "the", "and", "or", "for", "with", "at", "on", "to",
+    "from", "by", "is", "was", "are", "were", "who", "that", "this", "these",
+    "his", "her", "their", "its", "as", "but", "not", "no",
+})
+
+
+def _has_function_word(name: str) -> bool:
+    """Catches titles and descriptions: "Young Woman in a Red Dress"."""
+    return bool({t.strip(".,").casefold() for t in name.split()} & _FUNCTION_WORDS)
 
 
 def _is_full_personal_name(name: str) -> bool:
@@ -305,6 +326,8 @@ def looks_like_org(name: str) -> bool:
     if not raw:
         return True
     if not _is_full_personal_name(raw):
+        return True
+    if _has_function_word(raw) or len(raw.split()) > 5:
         return True
     lowered = {t.strip(".,").casefold() for t in raw.split()}
     if lowered & _ORG_NAME_MARKERS:
