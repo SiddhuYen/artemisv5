@@ -42,15 +42,21 @@ class StructuredProvider(Protocol):
 
 
 from artemis.providers.edgar import EdgarProvider  # noqa: E402
+from artemis.providers.openalex import OpenAlexProvider  # noqa: E402
 from artemis.providers.opencorporates import OpenCorporatesProvider  # noqa: E402
+from artemis.providers.podcasts import PodcastProvider  # noqa: E402
 from artemis.providers.propublica import ProPublicaProvider  # noqa: E402
+from artemis.providers.rosters import RosterProvider  # noqa: E402
 
 
 def build_providers(settings) -> list[StructuredProvider]:  # type: ignore[no-untyped-def]
     """Every configured provider, in the order they should be consulted."""
     candidates: list[StructuredProvider] = [
-        EdgarProvider(settings),
-        ProPublicaProvider(settings),
+        RosterProvider(settings),      # org team pages — densest person-to-person source
+        EdgarProvider(settings),       # SEC filings
+        OpenAlexProvider(settings),    # academic co-authorship
+        PodcastProvider(settings),     # host interviewed guest
+        ProPublicaProvider(settings),  # IRS 990 boards
         OpenCorporatesProvider(settings),
     ]
     return [p for p in candidates if p.available()]
@@ -59,7 +65,10 @@ def build_providers(settings) -> list[StructuredProvider]:  # type: ignore[no-un
 __all__ = [
     "Discovery",
     "StructuredProvider",
+    "RosterProvider",
     "EdgarProvider",
+    "OpenAlexProvider",
+    "PodcastProvider",
     "ProPublicaProvider",
     "OpenCorporatesProvider",
     "build_providers",

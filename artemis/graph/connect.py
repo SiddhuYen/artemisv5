@@ -175,6 +175,7 @@ class Connector:
             return self._result(found=False)
 
         await self._search_loop(seed_a, seed_b)
+        await self._enrich_with_providers(seed_a, seed_b)
         routes = await self._build_routes(seed_a, seed_b)
 
         if not routes:
@@ -202,9 +203,7 @@ class Connector:
             probe, context=context, other_endpoint_name=other, is_seed=True
         )
         results = await self.provider.search(queries)
-        urls = self._urls_from(results)
-        urls += await self._structured_urls(name, [context] if context else [])
-        await self._ingest(urls)
+        await self._ingest(self._urls_from(results))
 
         matches = [
             n
@@ -340,11 +339,37 @@ class Connector:
         if not queries:
             return
         results = await self.provider.search(queries)
-        urls = self._urls_from(results)
-        # Structured lookups only for nodes adjacent to an endpoint. Run on every
-        # expanded node they produced 45 discoveries of tangential filings and
-        # ate the fetch budget; the payoff is concentrated near the endpoints.
-        for node_id, _endpoint in frontier[: self.s.provider_nodes_per_level]:
+        await self._ingest(self._urls_from(results))
+
+    async def _enrich_with_providers(self, seed_a: str, seed_b: str) -> None:
+        """Structured sources, run once the web crawl has settled.
+
+        Deliberately a second phase rather than interleaved. The web pass
+        establishes who is actually in play and what organisations they belong
+        to; only then is it worth asking a filings index or an academic graph
+        about them. Interleaved, these fired on every expanded node with any
+        org-shaped attribute and pulled in dozens of tangential documents before
+        the graph knew what mattered.
+
+        Everything discovered here goes through the ordinary fetch -> extract ->
+        ground path, so provider-sourced edges carry the same verbatim spans.
+        """
+        if not self.providers:
+            return
+        if self.ledger.out_of_time():
+            return
+
+        ta = traverse(self.store, seed_a, self.depth_a + 2)
+        tb = traverse(self.store, seed_b, self.depth_b + 2)
+        # Closest to an endpoint first — that is where a new document can still
+        # change whether the two sides meet.
+        ranked = sorted(
+            set(ta.dist) | set(tb.dist),
+            key=lambda n: min(ta.dist.get(n, 99), tb.dist.get(n, 99)),
+        )
+
+        targets: list[tuple[str, list[str]]] = []
+        for node_id in ranked[: self.s.provider_people]:
             node = self.store.get(node_id)
             if node is None:
                 continue
@@ -354,9 +379,17 @@ class Connector:
                 + sorted(node.attributes.get("institution", set()))
                 if len(o.split()) >= 2
             ]
-            if orgs:
-                urls += await self._structured_urls(node.display_name, orgs[:2])
+            targets.append((node.display_name, orgs[:2]))
+
+        self.log("providers.started", f"{len(targets)} people across "
+                 f"{len(self.providers)} providers",
+                 providers=[p.name for p in self.providers])
+
+        urls: list[tuple[str, str]] = []
+        for person, orgs in targets:
+            urls += await self._structured_urls(person, orgs)
         await self._ingest(urls)
+        self.log("providers.finished", f"{len(urls)} documents discovered")
 
     async def _replay_cached(self, person: str) -> int:
         """Re-enter previously grounded relations for this person, free.

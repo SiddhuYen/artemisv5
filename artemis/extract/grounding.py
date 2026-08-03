@@ -166,7 +166,7 @@ def ground_co_listings(
     log: JobLog,
     *,
     anchor: Optional[str] = None,
-    max_members: int = 25,
+    max_members: Optional[int] = None,
 ) -> list[Extraction]:
     """Turn verified rosters into co-listing edges.
 
@@ -188,7 +188,11 @@ def ground_co_listings(
             continue
 
         located: list[tuple[str, str, int, int, str]] = []
-        for member in roster.members[:max_members]:
+        # No cap: if a page lists 200 people alongside the anchor, all 200 are
+        # equally grounded and equally real. Truncating would silently discard
+        # evidence, and which 200th we kept would be an artefact of page order.
+        members = roster.members if max_members is None else roster.members[:max_members]
+        for member in members:
             if looks_like_org(member.name):
                 continue
             found = _locate(page, member.sentence_index, member.span_text)

@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     # URL-discovery only: they find documents the open web search misses, which
     # are then fetched and grounded like any other page. Serper remains the only
     # general web-search provider.
+    rosters_enabled: bool = True
+    openalex_enabled: bool = True
+    podcasts_enabled: bool = True
     edgar_enabled: bool = True
     #: The SEC requires a User-Agent carrying real contact details.
     edgar_user_agent: str = "Artemis Research research@example.invalid"
@@ -106,10 +109,9 @@ class Settings(BaseSettings):
     )
     #: Discovered URLs fetched per node expansion.
     provider_urls_per_node: int = 6
-    #: Nodes per level that get structured lookups. The payoff is concentrated
-    #: near the endpoints; running them on the whole frontier fetched dozens of
-    #: tangential filings.
-    provider_nodes_per_level: int = 4
+    #: People consulted in the post-web enrichment phase, closest to an endpoint
+    #: first. Providers run once the web crawl has settled, not interleaved.
+    provider_people: int = 25
 
     #: Drop grounded edges where neither party is already in the graph. They are
     #: real relationships, but they form islands no path can cross.
