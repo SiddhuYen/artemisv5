@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    # Starlette parses multipart lazily; POST /network/upload is the only route
+    # that takes a file, and without this it fails at request time, not import.
+    "python-multipart>=0.0.9",
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
     "httpx>=0.27",

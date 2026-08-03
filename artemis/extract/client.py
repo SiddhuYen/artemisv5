@@ -11,7 +11,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 
 from artemis.config import Settings
 from artemis.extract import prompts
@@ -203,8 +203,17 @@ class ClaudeClient:
 
     # -- extraction ---------------------------------------------------------
     async def extract_page(
-        self, page: PageDocument, anchor_names: Sequence[str] = ()
+        self,
+        page: PageDocument,
+        anchor_names: Sequence[str] = (),
+        *,
+        is_known: Optional[Callable[[str], bool]] = None,
     ) -> list[Extraction]:
+        """`is_known` reports whether a name is already in the caller's graph.
+
+        Used only by co-listing, to keep a roster that names someone we know
+        even when it does not name the anchor.
+        """
         if not page.sentences:
             return []
         if not self.enabled:
@@ -273,7 +282,11 @@ class ClaudeClient:
                     self.log.warn("colisting.malformed", str(exc).splitlines()[0], url=page.url)
 
             grounded = ground(page, raws, self.log) + ground_co_listings(
-                page, rosters, self.log, anchor=anchors[0] if anchors else None
+                page,
+                rosters,
+                self.log,
+                anchor=anchors[0] if anchors else None,
+                is_known=is_known,
             )
             for extraction in grounded:
                 fingerprint = (

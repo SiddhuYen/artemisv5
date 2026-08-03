@@ -225,6 +225,46 @@ class Connector:
             else:
                 clusters.append([node])
 
+        is_famous = self._a_is_famous if endpoint is Endpoint.A else self._b_is_famous
+
+        # A famous endpoint is fused rather than split. When one referent
+        # dominates a name in public coverage, same-name observations are
+        # overwhelmingly that person, and the fragments are pages describing
+        # him in terms too varied to reconcile attribute-wise — "Republican",
+        # "The Trump Organization", "hosting The Apprentice". Splitting there
+        # does not protect against a homonym; it strands most of his real
+        # relationships on nodes the search never reaches.
+        #
+        # Scoped deliberately to the endpoint, which is the person the caller
+        # named. It is NOT extended to interior nodes: a wrongly fused pivot
+        # invents a route that does not exist, and BFS returning shortest
+        # paths would then prefer it. Downstream, every node still climbs the
+        # ordinary merge ladder.
+        #
+        # And only when no disambiguator was given. A caller who writes
+        # "Michael Jordan" + "the Berkeley machine learning professor" has said
+        # which reading they mean, and both readings of that name are famous —
+        # fusing there would hand them the basketball player's network. Context
+        # means honour the context, via _context_fit below.
+        if len(clusters) > 1 and is_famous and not context:
+            keep = max(matches, key=lambda n: (len(n.observations), len(n.attributes)))
+            fused = 0
+            for node in matches:
+                if self.store.resolve_id(node.node_id) != self.store.resolve_id(keep.node_id):
+                    self.store.merge(keep.node_id, node.node_id)
+                    fused += 1
+            keep = self.store.get(self.store.resolve_id(keep.node_id)) or keep
+            self.log.warn(
+                "seed.fused_famous",
+                f"{name!r} is classified famous: fused {len(clusters)} readings into one seed",
+                clusters=len(clusters),
+                nodes_fused=fused,
+                observations=len(keep.observations),
+                endpoint=endpoint.value,
+            )
+            keep.endpoint = endpoint
+            return keep.node_id, None
+
         # Multiple inconsistent readings and no disambiguator: stop and ask,
         # rather than silently guessing which Michael Chen was meant.
         if len(clusters) > 1 and not context:
@@ -549,11 +589,37 @@ class Connector:
                 # person_a regardless of context.
                 origin = provenance.get(page.url) or provenance.get(page.final_url)
                 anchors = ([origin] if origin else []) + endpoints
-                return page, await self.claude.extract_page(page, anchors)
+                return page, await self.claude.extract_page(
+                    page, anchors, is_known=self._is_known_person
+                )
 
         # Extraction fans out; graph mutation stays serial so merges see a
         # consistent store.
-        for page, extractions in await asyncio.gather(*(extract(p) for p in pages)):
+        #
+        # Streamed rather than gathered. `gather` waits for the whole level
+        # before touching the graph, so `people` and `merges` sat frozen for
+        # minutes while the job worked — indistinguishable from a hang, and the
+        # reason a working crawl kept looking stalled. `as_completed` resolves
+        # each page the moment its extraction lands, so every counter advances
+        # continuously and the store is never more than one page behind.
+        tasks = [asyncio.create_task(extract(p)) for p in pages]
+        ingested = 0
+        for finished in asyncio.as_completed(tasks):
+            try:
+                page, extractions = await finished
+            except Exception as exc:
+                self.log.warn("extract.failed", f"{type(exc).__name__}: {exc}")
+                continue
+            ingested += 1
+            if ingested % 10 == 0 or ingested == len(tasks):
+                self.log(
+                    "ingest.progress",
+                    f"{ingested}/{len(tasks)} pages resolved",
+                    pages=ingested,
+                    of=len(tasks),
+                    nodes=len(self.store.nodes),
+                    edges=len(self.store.edges),
+                )
             origin = provenance.get(page.url) or provenance.get(page.final_url)
             for extraction in extractions:
                 if not self._connects_to_graph(extraction, origin):
@@ -584,6 +650,16 @@ class Connector:
                         source_title=page.title,
                         retrieved_at=page.retrieved_at,
                     )
+
+    def _is_known_person(self, name: str) -> bool:
+        """Is this name already someone in the graph?
+
+        Lets a roster that does not name the anchor still be used, hung off a
+        member we already know — "Y Combinator founders" does not list Diana Hu
+        but does list Paul Graham, and it genuinely asserts that he founded YC
+        with Livingston, Blackwell and Morris.
+        """
+        return bool(self.store.candidates_for(name))
 
     def _connects_to_graph(self, extraction, origin: Optional[str]) -> bool:  # type: ignore[no-untyped-def]
         """Would this edge attach to what we already know, or float free?

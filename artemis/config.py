@@ -143,14 +143,21 @@ class Settings(BaseSettings):
     drop_name_only_pivots: bool = False
 
     # --- budgets (defaults; per-request Budget overrides these) -------------
-    max_nodes_expanded: int = 60
+    #
+    # Sized from measured runs, not guesswork. Completions so far used 228, 384
+    # and 545 Claude calls; 130-350 pages; 4-62 Serper credits; 10-18 minutes.
+    # The previous defaults (200 calls / 600s) cut short every job submitted
+    # without an explicit budget — i.e. every job launched from the console —
+    # and returned found:false for want of budget, which reads exactly like
+    # "no path exists" and is not the same thing.
+    max_nodes_expanded: int = 120
     # Deliberately NOT aliased to ARTEMIS_SERPER_QUOTA: an account-level quota
     # (e.g. 50,000) is not a per-job ceiling, and reading it as one would let a
     # single runaway job spend the month's credits.
-    max_serper_credits: int = 150
-    max_fetches: int = 250
-    max_claude_calls: int = 200
-    wall_clock_s: float = 600.0
+    max_serper_credits: int = 300
+    max_fetches: int = 800
+    max_claude_calls: int = 1200
+    wall_clock_s: float = 1800.0
 
     # --- cache -------------------------------------------------------------
     cache_dir: Path = Field(default=Path(".artemis-cache"))

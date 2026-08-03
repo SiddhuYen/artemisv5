@@ -32,6 +32,7 @@ from artemis.search.serper import SerperProvider, SerperUnavailable
 class JobStore(Protocol):
     async def submit(self, request: ConnectRequest) -> str: ...
     def get(self, job_id: str) -> Optional[JobState]: ...
+    def list(self, limit: int = 0) -> list[JobState]: ...
     async def cancel(self, job_id: str) -> bool: ...
 
 
@@ -54,7 +55,31 @@ class InProcessJobRegistry:
         return job_id
 
     def get(self, job_id: str) -> Optional[JobState]:
-        return self._jobs.get(job_id)
+        state = self._jobs.get(job_id)
+        return self._with_live_elapsed(state) if state else None
+
+    def list(self, limit: int = 0) -> list[JobState]:
+        """Newest first. The UI's job grid reads this; nothing else does."""
+        ordered = sorted(self._jobs.values(), key=lambda s: s.created_at, reverse=True)
+        chosen = ordered[:limit] if limit > 0 else ordered
+        return [self._with_live_elapsed(s) for s in chosen]
+
+    @staticmethod
+    def _with_live_elapsed(state: JobState) -> JobState:
+        """Report elapsed time as measured, not as last recorded.
+
+        `stats.elapsed_s` is written by the log sink, so it only advances when
+        the job has something to say. A crawl waiting on a batch of extractions
+        emits nothing for minutes and its timer sits still — which reads as
+        "stalled" when it is merely quiet, and reads as "26 seconds" when the
+        job has genuinely been running for ten minutes.
+
+        Every other stat is a count and is correct as recorded. Only elapsed is
+        a clock, so only elapsed is recomputed on read.
+        """
+        if state.status is JobStatus.RUNNING:
+            state.stats.elapsed_s = round((utcnow() - state.created_at).total_seconds(), 2)
+        return state
 
     async def cancel(self, job_id: str) -> bool:
         task = self._tasks.get(job_id)

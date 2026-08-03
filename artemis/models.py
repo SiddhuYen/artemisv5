@@ -154,6 +154,11 @@ ATTRIBUTE_KEYS: tuple[str, ...] = (
     "institution",
     "location",
     "field",
+    #: Everything the bucketing heuristics do not recognise. Kept out of the
+    #: exclusive keys and out of every compatibility check on purpose: it is
+    #: recorded and shown, but it gets no vote on whether two observations are
+    #: the same human. See resolve.classify_attribute.
+    "other",
 )
 
 
@@ -517,6 +522,68 @@ class ConnectRequest(BaseModel):
 
 class ConnectAccepted(BaseModel):
     job_id: str
+
+
+class OperatorView(BaseModel):
+    """Who the uploaded roster belongs to.
+
+    Only meaningful once a CSV exists — a roster with no owner is a list of
+    names nobody claims. Absent it, nothing asks for this.
+    """
+
+    name: str
+    context: str = ""
+    set_at: Optional[str] = None
+
+
+class SetOperatorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    #: The same free-text disambiguator ``ConnectRequest.context_a`` takes; it
+    #: is prefilled from here whenever the operator is the origin of a connect.
+    context: str = Field(default="", max_length=200)
+
+
+class ContactView(BaseModel):
+    name: str
+    norm_name: str = ""
+    role: str = ""
+    company: str = ""
+    profile_url: str = ""
+    connected_on: str = ""
+    added_at: Optional[str] = None
+
+
+class NetworkUploadResult(BaseModel):
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    total: int = 0
+    parsed: int = 0
+
+
+class NetworkMatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    names: list[str] = Field(default_factory=list, max_length=500)
+
+
+class JobSummary(BaseModel):
+    """One row of the job grid. Deliberately not the whole JobState."""
+
+    id: str
+    status: JobStatus
+    person_a: str
+    person_b: str
+    context_a: Optional[str] = None
+    context_b: Optional[str] = None
+    found: Optional[bool] = None
+    routes: int = 0
+    created_at: str
+    updated_at: str
+    stats: Stats
+    error: Optional[str] = None
 
 
 class LogEntry(BaseModel):

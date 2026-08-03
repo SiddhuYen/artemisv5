@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Artemis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=VT323&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/artemis.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     CONSOLE — the whole app is one screen: set up your network, then
+     run a connect. There is no board, no origin tagging, no per-board
+     scoping; a connect is always just this build's /connect workflow
+     between two names.
+═══════════════════════════════════════════════════════════════════ -->
+<div id="homeView">
+
+  <div class="hv-fx" aria-hidden="true">
+    <div class="hv-scan"></div>
+    <div class="hv-sweep"></div>
+    <div class="hv-vignette"></div>
+  </div>
+
+  <div class="hv-scroll">
+    <div class="hv-wrap">
+
+      <!-- HUD -->
+      <header class="hv-hud">
+        <div class="hv-brand">
+          <div class="hv-mark">
+            <svg viewBox="0 0 100 88" style="width:46px;height:40px;display:block" fill="currentColor" aria-label="Artemis">
+              <polygon points="50,3 93,29 7,29"/>
+              <polygon points="50,12 80,29 20,29" fill="var(--bg0,#0d0808)" opacity="0.55"/>
+              <circle cx="50" cy="24" r="2.4" fill="var(--bg0,#0d0808)" opacity="0.7"/>
+              <rect x="9" y="31" width="82" height="7"/>
+              <rect x="14" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="27" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="40" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="53" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="66" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="79" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="11" y="39" width="78" height="2.5"/>
+              <rect x="11" y="69" width="78" height="2.5"/>
+              <rect x="6" y="72" width="88" height="5"/>
+              <rect x="1" y="78" width="98" height="6"/>
+            </svg>
+          </div>
+          <div class="hv-word">
+            <h1>ARTEMIS</h1>
+            <div class="hv-sub">// EVIDENCE-GROUNDED INTRODUCTION PATHS</div>
+          </div>
+        </div>
+        <div class="hv-hud-right">
+          <div class="hv-statchip">
+            <span class="k">NETWORK</span>
+            <span class="v"><b id="hvStatContacts">0</b> CONTACTS</span>
+          </div>
+          <div class="hv-statchip">
+            <span class="k">RUNS</span>
+            <span class="v"><b id="hvStatJobs">0</b> CONNECTS</span>
+          </div>
+          <div class="hv-opnode fr">
+            <span class="br tl"></span><span class="br br2"></span>
+            <div class="av" id="hvBadge" onclick="editOperator()">??</div>
+            <div class="who" onclick="editOperator()">
+              <div class="n" id="hvUserName">NO OPERATOR</div>
+              <div class="r" id="hvUserRole">// UNSET</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- SETUP -->
+      <div class="hv-steps">
+        <div class="hv-step" id="stepNetwork">
+          <div class="hv-step-n">01</div>
+          <div class="hv-step-body">
+            <div class="hv-step-k">YOUR NETWORK</div>
+            <div class="hv-step-v" id="stepNetworkV">NO CSV LOADED</div>
+          </div>
+          <div class="hv-step-actions">
+            <button class="hv-btn ghost" onclick="showImport()">⬆ UPLOAD CSV</button>
+            <button class="hv-btn ghost" id="stepNetworkView" onclick="showNetwork()" style="display:none">@ VIEW</button>
+          </div>
+        </div>
+
+        <!-- Required only once a CSV exists: the roster is somebody's
+             connections, and an unowned one has no owner to be. -->
+        <div class="hv-step" id="stepOperator">
+          <div class="hv-step-n">02</div>
+          <div class="hv-step-body">
+            <div class="hv-step-k">OPERATOR</div>
+            <div class="hv-step-v" id="stepOperatorV">NOT SET<span class="sub">OPTIONAL UNTIL A CSV IS LOADED</span></div>
+          </div>
+          <div class="hv-step-actions">
+            <button class="hv-btn ghost" onclick="editOperator()">SET</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONNECT CONSOLE -->
+      <div class="rt-section cc-section" id="ccSection">
+        <div class="cc-grid">
+          <div class="cc-side">
+            <div class="bvr-flbl">PERSON A</div>
+            <div class="cc-row">
+              <input class="rt-input" id="ccPersonA" type="text" placeholder="NAME"
+                     onkeydown="if(event.key==='Enter')runConnect()">
+              <button class="cc-chip" id="ccUseOperator" onclick="useOperatorAsA()" disabled
+                      title="Fill this in with the operator">◧ ME</button>
+              <button class="cc-chip" id="ccPickA" onclick="openPicker('a')" disabled
+                      title="Pick someone out of your imported network">▤ NETWORK</button>
+            </div>
+            <input class="cc-ctx" id="ccContextA" type="text"
+                   placeholder="optional context — &quot;founder of Acme&quot;, disambiguates a common name">
+          </div>
+
+          <div class="cc-arrow">◀ ▶</div>
+
+          <div class="cc-side">
+            <div class="bvr-flbl">PERSON B</div>
+            <div class="cc-row">
+              <input class="rt-input" id="ccPersonB" type="text" placeholder="NAME"
+                     onkeydown="if(event.key==='Enter')runConnect()">
+              <button class="cc-chip" id="ccPickB" onclick="openPicker('b')" disabled
+                      title="Pick someone out of your imported network">▤ NETWORK</button>
+            </div>
+            <input class="cc-ctx" id="ccContextB" type="text"
+                   placeholder="optional context — &quot;trustee in Boston&quot;, disambiguates a common name">
+          </div>
+        </div>
+
+        <div class="cc-budget">
+          <div class="cc-field">
+            <div class="bvr-flbl">DEPTH</div>
+            <select class="bvr-select" id="ccDepth">
+              <option value="1">1 — fast</option>
+              <option value="2" selected>2 — balanced</option>
+              <option value="3">3 — deep (slow)</option>
+            </select>
+          </div>
+          <div class="cc-field">
+            <div class="bvr-flbl">SERPER CREDITS</div>
+            <input class="rt-input" id="ccCredits" type="number" min="1" step="10" value="150">
+          </div>
+          <div class="cc-field">
+            <div class="bvr-flbl">WALL CLOCK (S)</div>
+            <input class="rt-input" id="ccWall" type="number" min="30" step="30" value="600">
+          </div>
+          <div class="cc-run">
+            <button class="rt-find-btn" id="ccRunBtn" onclick="runConnect()">RUN CONNECT ▸</button>
+          </div>
+        </div>
+
+        <div class="cc-hint">
+          Every hop returned carries a <b>verbatim span</b> from a fetched page and the URL it came from.
+          Builds take minutes of live crawling — the run opens as soon as it is accepted and streams its log.
+        </div>
+      </div>
+
+      <!-- RUNS -->
+      <div class="hv-toolbar" style="margin-top:34px">
+        <div class="hv-section-title">
+          <h2>RUNS</h2>
+          <span class="hv-cnt" id="hvJobCount">[ 0 ]</span>
+        </div>
+        <div class="hv-tools">
+          <div class="hv-search">
+            <span class="pre">▸</span>
+            <input id="hvSearch" type="text" placeholder="SEARCH RUNS…" oninput="renderJobs()">
+          </div>
+        </div>
+      </div>
+      <div class="hv-grid" id="jobGrid"></div>
+
+      <footer class="hv-foot">
+        <span>ARTEMIS v5 · <span id="hvHealth">CHECKING LINK…</span> <span class="blink">●</span></span>
+        <span id="hvDegraded" class="hv-provider-warn" style="display:none">⚠ DEGRADED — NO ANTHROPIC KEY, NO REFERENT RESOLUTION</span>
+        <span id="hvFooterR">NO OPERATOR · 0 CONTACTS</span>
+      </footer>
+
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ NETWORK VIEW ═══════════════════ -->
+<div id="networkView" class="connections-screen">
+  <div class="hv-fx" aria-hidden="true">
+    <div class="hv-scan"></div><div class="hv-sweep"></div><div class="hv-vignette"></div>
+  </div>
+  <div class="hv-scroll">
+    <div class="hv-wrap">
+      <header class="hv-hud">
+        <div class="hv-brand">
+          <div class="hv-mark">
+            <svg viewBox="0 0 100 88" style="width:46px;height:40px;display:block" fill="currentColor" aria-label="Artemis">
+              <polygon points="50,3 93,29 7,29"/>
+              <polygon points="50,12 80,29 20,29" fill="var(--bg0,#0d0808)" opacity="0.55"/>
+              <circle cx="50" cy="24" r="2.4" fill="var(--bg0,#0d0808)" opacity="0.7"/>
+              <rect x="9" y="31" width="82" height="7"/>
+              <rect x="14" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="27" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="40" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="53" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="66" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="79" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="11" y="39" width="78" height="2.5"/>
+              <rect x="11" y="69" width="78" height="2.5"/>
+              <rect x="6" y="72" width="88" height="5"/>
+              <rect x="1" y="78" width="98" height="6"/>
+            </svg>
+          </div>
+          <div class="hv-word">
+            <h1>ARTEMIS</h1>
+            <div class="hv-sub">// MY NETWORK</div>
+          </div>
+        </div>
+        <div class="hv-hud-right">
+          <div class="hv-opnode fr">
+            <span class="br tl"></span><span class="br br2"></span>
+            <div class="av" id="nwBadge">??</div>
+            <div class="who">
+              <div class="n" id="nwUserName">NO OPERATOR</div>
+              <div class="r">// ROSTER OWNER</div>
+            </div>
+            <button class="hv-btn ghost" onclick="showHome()" style="margin-left:10px;font-size:11px;height:30px;padding:0 12px;">← CONSOLE</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="hv-toolbar">
+        <div class="hv-section-title">
+          <h2>IMPORTED CONTACTS</h2>
+          <span class="hv-cnt" id="nwCount">[ 0 ]</span>
+        </div>
+        <div class="hv-tools">
+          <div class="hv-search">
+            <span class="pre">▸</span>
+            <input id="nwSearch" type="text" placeholder="SEARCH CONTACTS…" oninput="renderNetwork()">
+          </div>
+          <button class="hv-btn ghost" onclick="showImport()">⬆ IMPORT</button>
+          <button class="hv-btn ghost" onclick="clearNetwork()" style="border-color:#8a4040;color:#dd5555;">✕ CLEAR ALL</button>
+        </div>
+      </div>
+
+      <div class="hv-grid" id="nwGrid"></div>
+
+      <footer class="hv-foot">
+        <span>ARTEMIS v5 · ROSTER <span class="blink">●</span></span>
+        <span id="nwFooterR">0 CONTACTS</span>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ RUN VIEW ═══════════════════ -->
+<div id="jobView" class="connections-screen">
+  <div class="hv-fx" aria-hidden="true">
+    <div class="hv-scan"></div><div class="hv-sweep"></div><div class="hv-vignette"></div>
+  </div>
+  <div class="hv-scroll">
+    <div class="hv-wrap">
+      <header class="hv-hud">
+        <div class="hv-brand">
+          <div class="hv-mark">
+            <svg viewBox="0 0 100 88" style="width:46px;height:40px;display:block" fill="currentColor" aria-label="Artemis">
+              <polygon points="50,3 93,29 7,29"/>
+              <polygon points="50,12 80,29 20,29" fill="var(--bg0,#0d0808)" opacity="0.55"/>
+              <circle cx="50" cy="24" r="2.4" fill="var(--bg0,#0d0808)" opacity="0.7"/>
+              <rect x="9" y="31" width="82" height="7"/>
+              <rect x="14" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="27" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="40" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="53" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="66" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="79" y="40" width="7" height="30" rx="0.5"/>
+              <rect x="11" y="39" width="78" height="2.5"/>
+              <rect x="11" y="69" width="78" height="2.5"/>
+              <rect x="6" y="72" width="88" height="5"/>
+              <rect x="1" y="78" width="98" height="6"/>
+            </svg>
+          </div>
+          <div class="hv-word">
+            <h1>ARTEMIS</h1>
+            <div class="hv-sub">// CONNECT RUN</div>
+          </div>
+        </div>
+        <div class="hv-hud-right">
+          <button class="hv-btn ghost" id="jvCancelBtn" onclick="cancelJob()" style="display:none;border-color:#8a4040;color:#dd5555;">✕ CANCEL RUN</button>
+          <button class="hv-btn ghost" onclick="showHome()">← CONSOLE</button>
+        </div>
+      </header>
+
+      <div class="jv-head">
+        <div class="jv-pair"><span id="jvA">—</span><span class="vs">◀▶</span><span id="jvB">—</span></div>
+        <span class="pill" id="jvStatus">—</span>
+        <span class="pill" id="jvFound" style="display:none"></span>
+      </div>
+      <div class="hv-loadbar indeterminate" id="jvProgress"><div class="hv-loadbar-fill"></div></div>
+
+      <div class="jv-stats" id="jvStats"></div>
+
+      <div id="jvWarnings"></div>
+
+      <div class="bvr-thinking" style="display:block">
+        <div class="bvr-thinking-hdr">// ARTEMIS THINKING — EVERY QUERY, FETCH, GROUNDING, AND MERGE DECISION</div>
+        <div class="bvr-thinking-log jv-log" id="jvLog"></div>
+      </div>
+
+      <div class="jv-section-lbl" id="jvResultLbl">// AWAITING RESULT</div>
+      <div id="jvResult"></div>
+
+      <footer class="hv-foot">
+        <span>ARTEMIS v5 · <span id="jvJobId">—</span> <span class="blink">●</span></span>
+        <span id="jvFooterR"></span>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ IMPORT MODAL ═══════════════════ -->
+<div id="liScrim" onclick="liScrimClick(event)">
+  <div id="liModal">
+    <span class="art-br tl"></span><span class="art-br tr"></span>
+    <span class="art-br bl"></span><span class="art-br br2"></span>
+    <div class="li-lbl">// IMPORT NETWORK</div>
+    <h3>LINKEDIN CONNECTIONS</h3>
+
+    <div class="li-steps">
+      <div class="li-step">
+        <div class="sn">1</div>
+        <div>Go to <a href="https://www.linkedin.com/mypreferences/d/categories/data-privacy" target="_blank" rel="noopener noreferrer">linkedin.com → Settings → Data Privacy → Get a copy of your data</a></div>
+      </div>
+      <div class="li-step">
+        <div class="sn">2</div>
+        <div>Select <b style="color:oklch(0.72 0.205 22)">Connections</b> only, then click <b style="color:oklch(0.72 0.205 22)">Request archive</b>. LinkedIn emails you a link (usually within 10 minutes).</div>
+      </div>
+      <div class="li-step">
+        <div class="sn">3</div>
+        <div>Download the zip, open it, and drag <b style="color:oklch(0.72 0.205 22)">Connections.csv</b> into the box below.</div>
+      </div>
+    </div>
+
+    <!-- The operator gate. Shown only when there is no operator yet, since
+         that is the one thing the upload refuses without. -->
+    <div id="liOperatorGate" style="display:none">
+      <div class="li-gate-lbl">// WHOSE CONNECTIONS ARE THESE? SET THE OPERATOR TO IMPORT</div>
+      <input type="text" class="li-in" id="liOperatorName" placeholder="your full name"
+             oninput="refreshImportBtn()" onkeydown="if(event.key==='Enter')confirmImport()">
+      <input type="text" class="li-in" id="liOperatorContext"
+             placeholder="optional — how you'd be disambiguated, e.g. &quot;founder of Acme&quot;">
+    </div>
+
+    <div class="li-drop" id="liDrop"
+      ondragover="event.preventDefault();this.classList.add('dragover')"
+      ondragleave="this.classList.remove('dragover')"
+      ondrop="liDrop(event)"
+      onclick="document.getElementById('liFileIn').click()">
+      <input type="file" id="liFileIn" accept=".csv,text/csv" style="display:none" onchange="liFileChange(event)">
+      <div class="li-drop-icon">📎</div>
+      <div class="li-drop-hint">Drop <b>Connections.csv</b> here or click to browse</div>
+    </div>
+
+    <div class="li-preview" id="liPreview">
+      <div class="li-preview-hdr" id="liPreviewHdr">0 contacts found</div>
+      <div id="liPreviewRows"></div>
+    </div>
+
+    <div class="li-actions">
+      <button class="li-btn" id="liImportBtn" onclick="confirmImport()" disabled>IMPORT ▸</button>
+      <button class="li-btn ghost" onclick="closeImport()">CANCEL</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ OPERATOR MODAL ═══════════════════ -->
+<div id="opScrim" onclick="opScrimClick(event)">
+  <div id="opModal">
+    <span class="art-br tl"></span><span class="art-br tr"></span>
+    <span class="art-br bl"></span><span class="art-br br2"></span>
+    <div class="li-lbl">// OPERATOR</div>
+    <h3>WHO ARE YOU?</h3>
+    <p class="op-sub">Whose connections the imported roster is. Used to prefill <b>Person A</b> and to
+      flag a route that runs through somebody already in your CSV. Nothing else depends on it.</p>
+    <input type="text" class="li-in" id="opName" placeholder="your full name"
+           onkeydown="if(event.key==='Enter')saveOperator()">
+    <input type="text" class="li-in" id="opContext"
+           placeholder="optional context — &quot;founder of Acme&quot;">
+    <div class="li-actions">
+      <button class="li-btn" onclick="saveOperator()">SAVE ▸</button>
+      <button class="li-btn ghost" onclick="closeOperator()">CANCEL</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ NETWORK PICKER ═══════════════════ -->
+<div id="cpPanel">
+  <div class="cp-top">
+    <span class="cp-title" id="cpTitle">// PICK PERSON A</span>
+    <button class="cp-x" onclick="closePicker()">✕</button>
+  </div>
+  <div class="cp-search">
+    <input type="text" id="cpSearch" placeholder="filter…" oninput="renderPicker()">
+  </div>
+  <div class="cp-list" id="cpList"></div>
+</div>
+
+<!-- ═══════════════════ BOOT ═══════════════════ -->
+<div id="hvBoot">
+  <div class="bl" style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+    <div class="hv-boot-line" style="animation-delay:0.05s">ARTEMIS // EVIDENCE-GROUNDED INTRODUCTION PATHS</div>
+    <div class="hv-boot-line" style="animation-delay:0.35s;color:oklch(0.58 0.045 22)">&gt; LOADING NETWORK ......... OK</div>
+    <div class="hv-boot-line" style="animation-delay:0.65s;color:oklch(0.58 0.045 22)">&gt; CHECKING PROVIDERS ...... OK</div>
+    <div class="hv-boot-line" style="animation-delay:0.95s;color:oklch(0.58 0.045 22)">&gt; GROUNDING ENGINE ....... <span style="color:oklch(0.72 0.205 22)">READY</span></div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

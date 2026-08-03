@@ -8,7 +8,7 @@ at is not evidence.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from artemis.identity.normalize import (
     could_be_same_name,
@@ -167,6 +167,7 @@ def ground_co_listings(
     *,
     anchor: Optional[str] = None,
     max_members: Optional[int] = None,
+    is_known: Optional[Callable[[str], bool]] = None,
 ) -> list[Extraction]:
     """Turn verified rosters into co-listing edges.
 
@@ -215,20 +216,33 @@ def ground_co_listings(
         if len(located) < 2:
             continue
 
-        # The roster must include the person we are actually researching.
+        # Who do we hang this roster off?
         #
-        # Falling back to "first listed member" meant any roster on any fetched
-        # page produced a full membership list of edges. One page about a
-        # community choir contributed ~90 singers across five rosters and
-        # crowded out the real search. A roster that does not name the anchor
-        # tells us nothing about the anchor, however real it is.
+        # First choice is the person we are researching. But a roster that does
+        # not name them can still be worth having: "Y Combinator founders" does
+        # not list Diana Hu, yet it genuinely asserts that Paul Graham, Jessica
+        # Livingston, Trevor Blackwell and Robert Morris founded YC together.
+        # Skipping it threw those away along with the anchor edges we correctly
+        # could not make.
+        #
+        # So fall back to any member the graph already knows. That keeps the
+        # Belle Voci case out — a community choir whose members are strangers to
+        # the search connects to nothing and is still skipped — while keeping
+        # rosters that attach to what we have. Note the anchor is NOT wired to
+        # the other members here: the page does not list them together, and
+        # inferring that edge is exactly what this system refuses to do.
         pivot = next(
             (m for m in located if anchor and could_be_same_name(anchor, m[0])), None
         )
+        pivot_reason = "anchor is listed"
+        if pivot is None and is_known is not None:
+            pivot = next((m for m in located if is_known(m[0])), None)
+            pivot_reason = "member already in the graph"
         if pivot is None:
             log(
                 "colisting.skipped",
-                f"{roster.affiliation!r} does not list {anchor or 'the anchor'}",
+                f"{roster.affiliation!r} lists neither {anchor or 'the anchor'} "
+                "nor anyone already known",
                 url=page.url,
                 members=len(located),
             )
@@ -270,6 +284,8 @@ def ground_co_listings(
                 affiliation=roster.affiliation,
                 kind=roster.affiliation_kind,
                 members=len(located),
+                pivot=pivot[0],
+                pivot_reason=pivot_reason,
             )
     return out
 

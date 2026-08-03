@@ -56,9 +56,70 @@ _FIELD_MARKERS = (
 # Keys where two different values are treated as a conflict.
 _EXCLUSIVE_KEYS = ("employer", "institution")
 
+#: Words that can sit inside an organisation's name in lower case without the
+#: name stopping being a proper noun: "Bank of England", "Sidley Austin LLP".
+_ORG_FUNCTION_WORDS = frozenset(
+    {"of", "the", "and", "for", "at", "in", "on", "de", "du", "la", "le", "von",
+     "van", "der", "den", "&", "-", "y", "el"}
+)
+
+#: Capitalised things that are emphatically not employers. Each of these was
+#: observed in the `employer` bucket on a real job, where — being an exclusive
+#: key — it declared two observations of one person to be two people.
+#: Political affiliation and rich-lists are the two that recur.
+_NOT_EMPLOYERS = frozenset(
+    {"republican", "republicans", "democrat", "democrats", "democratic",
+     "independent", "conservative", "conservatives", "labour", "labor", "tory",
+     "tories", "gop", "libertarian", "green party",
+     "forbes 400", "fortune 500", "time 100", "forbes", "fortune"}
+)
+
+#: An organisation's name is a name, not a sentence. "hosting hit reality show
+#: The Apprentice" arrived as an employer because it contains a capital letter.
+_MAX_ORG_TOKENS = 6
+
+
+def looks_like_org(value: str) -> bool:
+    """Could this string be the name of a place someone works?
+
+    ``_nameable`` used to answer this with ``any(c.isupper() for c in v)``,
+    which its own docstring did not describe: an organisation is a proper noun
+    and is capitalised *wherever* it is written, not merely somewhere. One
+    capital anywhere let a six-word verb phrase through.
+
+    So every content token has to be capitalised (function words inside a name
+    may be lower case), the whole thing has to be short enough to be a name,
+    and a small set of capitalised non-employers is refused outright.
+    """
+    tokens = value.split()
+    if not tokens or len(tokens) > _MAX_ORG_TOKENS:
+        return False
+    if fold(value).strip() in _NOT_EMPLOYERS:
+        return False
+    content = [t for t in tokens if fold(t) not in _ORG_FUNCTION_WORDS]
+    if not content:
+        return False
+    # Digits are fine inside a name ("Section 9", "3M"); they just cannot be
+    # the thing that makes it look like a proper noun.
+    return all(t[0].isupper() or t[0].isdigit() for t in content) and any(
+        c.isupper() for c in value
+    )
+
 
 def classify_attribute(value: str) -> str:
-    """Bucket a free-text attribute into one of the Node.attributes keys."""
+    """Bucket a free-text attribute into one of the Node.attributes keys.
+
+    The fallthrough used to be ``employer``, which is one of two
+    ``_EXCLUSIVE_KEYS`` — so anything the markers failed to recognise landed in
+    the bucket with the most power to declare two people different. 'son',
+    'Republican' and 'billionaire businessman' all became employers, and since
+    they do not overlap each other, every pair of observations positively
+    contradicted every other. That is what split Donald Trump into four
+    readings and aborted the job before it searched.
+
+    Unrecognised text now falls to ``other``, which is in no exclusive key and
+    in no compatibility check: it is recorded, and it gets no vote on identity.
+    """
     v = fold(value)
     if any(m in v for m in _ROLE_MARKERS):
         return "role"
@@ -66,7 +127,7 @@ def classify_attribute(value: str) -> str:
         return "institution"
     if any(m in v for m in _FIELD_MARKERS):
         return "field"
-    return "employer"
+    return "employer" if looks_like_org(value) else "other"
 
 
 def bucket_attributes(values: list[str]) -> dict[str, set[str]]:
@@ -107,16 +168,17 @@ def _overlaps(left: set[str], right: set[str]) -> bool:
 def _nameable(values: set[str]) -> set[str]:
     """Values that could actually be an organisation's name.
 
-    Anything the extractor returns that we cannot bucket elsewhere lands in
-    `employer`, which is an exclusive key — so a stray descriptor becomes a
-    merge-blocking "conflict". "subordinate" versus "PantheonPrep" blocked a
-    real merge this way.
+    A stray descriptor in an exclusive key becomes a merge-blocking "conflict"
+    — "subordinate" versus "PantheonPrep" blocked a real merge this way. An
+    organisation is a proper noun and is capitalised wherever it is written, so
+    a bare lowercase word is a description of a role, not the name of a place
+    to work, and gets no vote on whether two people are different.
 
-    An organisation is a proper noun and is capitalised wherever it is written.
-    A bare lowercase word is a description of a role, not the name of a place
-    to work, so it gets no vote on whether two people are different.
+    Still applied even though ``classify_attribute`` now keeps non-names out of
+    ``employer``: ``institution`` is the other exclusive key, and it is filled
+    by keyword match ("the clinic", "a teaching hospital") rather than by shape.
     """
-    return {v for v in values if any(c.isupper() for c in v)}
+    return {v for v in values if looks_like_org(v)}
 
 
 def attributes_conflict(a: dict[str, set[str]], b: dict[str, set[str]]) -> Optional[str]:

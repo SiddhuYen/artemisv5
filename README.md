@@ -151,6 +151,26 @@ with it: attribute-only merges are refused once a name looks common. Claude advi
 but only ever to **veto** — it can block a merge the rules allowed, never promote one they refused.
 Every decision lands in the job log with its basis.
 
+### A famous endpoint is fused, not split
+
+Conservatism has a second failure mode besides the one rung 3 fixes. When one referent dominates a
+name in public coverage, same-name observations are overwhelmingly that person — and the pages
+describe him in terms too varied to reconcile attribute-wise. Splitting there protects against no
+homonym; it just strands most of his real relationships on nodes the search never reaches, and with
+no disambiguator to break the tie the job stops and asks a question with one true answer.
+
+So when an endpoint is classified `famous` **and the caller gave no context**, its readings are
+fused into one seed rather than returned as a disambiguation. Both conditions matter:
+
+- **Endpoint only.** Interior nodes still climb the ordinary ladder. A wrongly fused pivot invents a
+  route that does not exist, and since BFS returns shortest paths, the tool would prefer it — the
+  super-connector failure this whole layer exists to prevent.
+- **No context only.** `Michael Jordan` + `the Berkeley machine learning professor` is a case where
+  both readings are famous and the caller has already said which one they mean. Fusing there would
+  hand back the basketball player's network, so context routes to `_context_fit` instead.
+
+The fusion lands in the log as `seed.fused_famous` with the number of readings it absorbed.
+
 At return time, each interior node on a candidate route is re-checked: is `url1`'s P the same human
 as `url2`'s P? The result is reported, not hidden:
 
@@ -249,8 +269,17 @@ This is the notability logic the original design deferred, and it lives entirely
   canonical profile URL) — one personal site outweighs an undated employer mismatch, which is
   usually just a job change.
 - **Attribute bucketing is heuristic.** The extractor returns free-text attributes; they are sorted
-  into employer / role / institution / field by keyword. Misfiling an org as an employer can create
-  a false conflict, which costs recall, not correctness.
+  into employer / role / institution / field by keyword. What the keywords miss now falls to
+  `other`, which sits in no exclusive key and no compatibility check — unrecognised text is recorded
+  and displayed but gets no vote on identity. It used to fall to `employer`, which is an exclusive
+  key, so the bucket with the most power to declare two people different was also the bucket for
+  everything the heuristics failed to understand. `Republican`, `son` and `hosting hit reality show
+  The Apprentice` all became employers, none of them overlapped, and Donald Trump split into four
+  mutually contradicting readings — enough to abort the job at seeding before a single query ran.
+  The failure scaled with coverage, so it was worst on exactly the well-documented people the tool
+  is most often pointed at. A value now reaches `employer` only if it is shaped like an
+  organisation's name: every content word capitalised, short enough to be a name, and not on a small
+  list of capitalised non-employers (parties, rich-lists).
 - **`shared_page` pivots are conservative.** Detected when both hops are grounded on one URL, or one
   page carries observations of the pivot and both neighbours.
 - **No test suite in this build**, by request. The invariants that would be covered first: span
