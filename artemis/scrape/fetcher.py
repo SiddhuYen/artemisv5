@@ -1,0 +1,226 @@
+"""Async HTTP fetch: bounded concurrency, per-domain rate limit, robots.txt, retry.
+
+Individual dead URLs, parse errors, and rate limits log a warning and the crawl
+continues — a fetch layer that raises would let one bad host kill a job.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass
+from typing import Optional
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+
+import httpx
+
+from artemis.config import Settings
+from artemis.models import PageDocument, utcnow
+from artemis.runtime import BudgetLedger, JobLog
+from artemis.scrape.cache import DiskCache
+from artemis.scrape.extract_text import build_document
+
+_BINARY_SUFFIXES = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".gz",
+    ".tar", ".rar", ".7z", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+    ".ico", ".mp3", ".mp4", ".mov", ".avi", ".wav", ".exe", ".dmg", ".pkg",
+    ".woff", ".woff2", ".ttf", ".css", ".js", ".json", ".xml", ".rss",
+)
+_RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+
+@dataclass
+class FetchOutcome:
+    url: str
+    page: Optional[PageDocument] = None
+    reason: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.page is not None
+
+
+class Fetcher:
+    def __init__(
+        self,
+        settings: Settings,
+        cache: DiskCache,
+        ledger: BudgetLedger,
+        log: JobLog,
+        *,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> None:
+        self.s = settings
+        self.cache = cache
+        self.ledger = ledger
+        self.log = log
+        self._client = client
+        self._owns_client = client is None
+        self._global_sem = asyncio.Semaphore(settings.fetch_concurrency)
+        self._domain_sems: dict[str, asyncio.Semaphore] = {}
+        self._domain_last: dict[str, float] = {}
+        self._robots: dict[str, Optional[RobotFileParser]] = {}
+        self._robots_lock = asyncio.Lock()
+
+    # -- lifecycle ----------------------------------------------------------
+    async def __aenter__(self) -> "Fetcher":
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=self.s.fetch_timeout_s,
+                headers={
+                    "User-Agent": self.s.user_agent,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                limits=httpx.Limits(max_connections=self.s.fetch_concurrency * 2),
+            )
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    # -- politeness ---------------------------------------------------------
+    def _domain_sem(self, host: str) -> asyncio.Semaphore:
+        if host not in self._domain_sems:
+            self._domain_sems[host] = asyncio.Semaphore(self.s.per_domain_concurrency)
+        return self._domain_sems[host]
+
+    async def _respect_delay(self, host: str) -> None:
+        last = self._domain_last.get(host)
+        if last is not None:
+            wait = self.s.per_domain_delay_s - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._domain_last[host] = time.monotonic()
+
+    async def _robots_ok(self, url: str) -> bool:
+        if not self.s.respect_robots:
+            return True
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        async with self._robots_lock:
+            if origin not in self._robots:
+                parser: Optional[RobotFileParser] = None
+                try:
+                    assert self._client is not None
+                    resp = await self._client.get(f"{origin}/robots.txt", timeout=8.0)
+                    if resp.status_code < 400 and resp.text:
+                        parser = RobotFileParser()
+                        parser.parse(resp.text.splitlines())
+                except Exception:
+                    parser = None  # unreachable robots.txt is not a prohibition
+                self._robots[origin] = parser
+            parser = self._robots[origin]
+        if parser is None:
+            return True
+        try:
+            return parser.can_fetch(self.s.user_agent, url)
+        except Exception:
+            return True
+
+    # -- fetching -----------------------------------------------------------
+    async def fetch_many(self, urls: list[str]) -> list[FetchOutcome]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        return list(await asyncio.gather(*(self.fetch(u) for u in ordered)))
+
+    async def fetch(self, url: str) -> FetchOutcome:
+        if any(urlparse(url).path.lower().endswith(sfx) for sfx in _BINARY_SUFFIXES):
+            return FetchOutcome(url, reason="binary")
+
+        cached = await self.cache.get("fetch", url)
+        if cached is not None:
+            return await self._to_outcome(url, cached, from_cache=True)
+
+        if not self.ledger.try_spend_fetch():
+            return FetchOutcome(url, reason="budget")
+
+        if not await self._robots_ok(url):
+            self.log("fetch.skipped", "robots.txt disallows", url=url)
+            return FetchOutcome(url, reason="robots")
+
+        host = urlparse(url).netloc
+        async with self._global_sem, self._domain_sem(host):
+            await self._respect_delay(host)
+            payload = await self._get_with_retry(url)
+
+        if payload is None:
+            return FetchOutcome(url, reason="unreachable")
+
+        await self.cache.set("fetch", url, payload)
+        return await self._to_outcome(url, payload, from_cache=False)
+
+    async def _get_with_retry(self, url: str) -> Optional[dict]:
+        assert self._client is not None
+        delay = 1.0
+        for attempt in range(self.s.fetch_max_retries + 1):
+            try:
+                resp = await self._client.get(url)
+            except Exception as exc:
+                self.log.warn("fetch.error", f"{type(exc).__name__}: {exc}", url=url,
+                              attempt=attempt)
+                if attempt >= self.s.fetch_max_retries:
+                    return None
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+
+            if resp.status_code in _RETRY_STATUS and attempt < self.s.fetch_max_retries:
+                retry_after = resp.headers.get("retry-after")
+                wait = float(retry_after) if (retry_after or "").isdigit() else delay
+                self.log.warn("fetch.retry", f"HTTP {resp.status_code}", url=url, wait_s=wait)
+                await asyncio.sleep(min(wait, 15.0))
+                delay *= 2
+                continue
+
+            if resp.status_code >= 400:
+                self.log.warn("fetch.failed", f"HTTP {resp.status_code}", url=url)
+                return None
+
+            ctype = resp.headers.get("content-type", "").lower()
+            if ctype and "html" not in ctype and "text/plain" not in ctype:
+                self.log("fetch.skipped", f"content-type {ctype}", url=url)
+                return None
+
+            html = resp.text[: self.s.fetch_max_bytes]
+            return {
+                "final_url": str(resp.url),
+                "status": resp.status_code,
+                "html": html,
+                "retrieved_at": utcnow().isoformat(),
+            }
+        return None
+
+    async def _to_outcome(self, url: str, payload: dict, *, from_cache: bool) -> FetchOutcome:
+        # trafilatura/readability parsing is CPU-bound and was running inline on
+        # the event loop: a burst of pages stalled every other coroutine,
+        # including the API's own responses to /jobs polling.
+        doc, reason = await asyncio.to_thread(
+            build_document,
+            url=url,
+            final_url=payload.get("final_url", url),
+            html=payload.get("html", ""),
+            max_sentences=self.s.max_sentences_per_page,
+        )
+        if doc is None:
+            self.log("fetch.skipped", f"unusable page: {reason}", url=url)
+            return FetchOutcome(url, reason=reason)
+        doc.from_cache = from_cache
+        self.log(
+            "page.fetched",
+            doc.title or url,
+            url=url,
+            final_url=doc.final_url,
+            sentences=len(doc.sentences),
+            chars=len(doc.text),
+            cached=from_cache,
+        )
+        return FetchOutcome(url, page=doc)

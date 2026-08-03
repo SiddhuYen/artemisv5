@@ -1,0 +1,27 @@
+# Secrets — never commit. .env holds live Serper/Anthropic keys.
+.env
+.env.*
+!.env.example
+
+# Virtualenv
+.venv/
+venv/
+
+# Caches: search responses, fetched pages, Claude responses, relation store
+.artemis-cache/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

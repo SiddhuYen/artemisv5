@@ -1,0 +1,28 @@
+services:
+  artemis:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Required — the only door to the web.
+      ARTEMIS_SERPER_API_KEY: ${ARTEMIS_SERPER_API_KEY:-${SERPER_API_KEY:-}}
+      # Optional — without it the service runs degraded (no referent resolution).
+      ARTEMIS_ANTHROPIC_API_KEY: ${ARTEMIS_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}
+
+      ARTEMIS_EXTRACTION_MODEL: ${ARTEMIS_EXTRACTION_MODEL:-claude-haiku-4-5}
+      ARTEMIS_VERIFICATION_MODEL: ${ARTEMIS_VERIFICATION_MODEL:-claude-opus-5}
+
+      ARTEMIS_MAX_DEPTH_A: ${ARTEMIS_MAX_DEPTH_A:-2}
+      ARTEMIS_MAX_DEPTH_B: ${ARTEMIS_MAX_DEPTH_B:-1}
+      ARTEMIS_MAX_SERPER_CREDITS: ${ARTEMIS_MAX_SERPER_CREDITS:-150}
+      ARTEMIS_WALL_CLOCK_S: ${ARTEMIS_WALL_CLOCK_S:-600}
+      ARTEMIS_DROP_NAME_ONLY_PIVOTS: ${ARTEMIS_DROP_NAME_ONLY_PIVOTS:-false}
+
+      ARTEMIS_CACHE_DIR: /cache
+    volumes:
+      # Persist the search/fetch/Claude cache across restarts so re-runs are free.
+      - artemis-cache:/cache
+    restart: unless-stopped
+
+volumes:
+  artemis-cache:
