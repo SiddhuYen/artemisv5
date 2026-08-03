@@ -82,19 +82,54 @@ def _values(attrs: dict[str, set[str]], key: str) -> set[str]:
     return {fold(v) for v in attrs.get(key, set())}
 
 
+def _compact(value: str) -> str:
+    """Comparison form: letters and digits only.
+
+    "Pantheon Prep" and "PantheonPrep" are the same employer written two ways —
+    a page title against a directory listing. Compared literally they look like
+    a conflict, which blocked the two real Abhimanyu Sharma nodes from merging
+    and left his colleagues stranded on a node the search never reached.
+    """
+    return "".join(c for c in value if c.isalnum())
+
+
 def _overlaps(left: set[str], right: set[str]) -> bool:
     for a in left:
         for b in right:
-            if a == b or (len(a) > 3 and len(b) > 3 and (a in b or b in a)):
+            ca, cb = _compact(a), _compact(b)
+            if not ca or not cb:
+                continue
+            if ca == cb or (len(ca) > 3 and len(cb) > 3 and (ca in cb or cb in ca)):
                 return True
     return False
 
 
+def _nameable(values: set[str]) -> set[str]:
+    """Values that could actually be an organisation's name.
+
+    Anything the extractor returns that we cannot bucket elsewhere lands in
+    `employer`, which is an exclusive key — so a stray descriptor becomes a
+    merge-blocking "conflict". "subordinate" versus "PantheonPrep" blocked a
+    real merge this way.
+
+    An organisation is a proper noun and is capitalised wherever it is written.
+    A bare lowercase word is a description of a role, not the name of a place
+    to work, so it gets no vote on whether two people are different.
+    """
+    return {v for v in values if any(c.isupper() for c in v)}
+
+
 def attributes_conflict(a: dict[str, set[str]], b: dict[str, set[str]]) -> Optional[str]:
-    """Mutually exclusive values on the same key. Returns the offending key."""
+    """Mutually exclusive values on the same key. Returns the offending key.
+
+    Only genuine organisation names can conflict. This keeps the real signal —
+    "Linguistics" (a JNU academic) against "PantheonPrep" still blocks, because
+    those are two different people — while dropping the noise.
+    """
     for key in _EXCLUSIVE_KEYS:
-        left, right = _values(a, key), _values(b, key)
-        if left and right and not _overlaps(left, right):
+        left = _nameable(a.get(key, set()))
+        right = _nameable(b.get(key, set()))
+        if left and right and not _overlaps({fold(v) for v in left}, {fold(v) for v in right}):
             return key
     return None
 
