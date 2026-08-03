@@ -181,8 +181,17 @@ def ground_co_listings(
     """
     out: list[Extraction] = []
     for roster in rosters:
-        context = _locate(page, roster.context_sentence_index, roster.context_text)
-        if context is None:
+        if roster.context_sentence_index < 0:
+            # The affiliation is stated in the page title rather than the body.
+            # Still verbatim page content, so still citable — but it has to
+            # actually match the title we extracted, not be paraphrased.
+            title = (page.title or "").strip()
+            if not title or roster.context_text.strip() != title:
+                log.warn("colisting.rejected",
+                         "claimed the page title as affiliation but it does not match",
+                         url=page.url, affiliation=roster.affiliation[:80])
+                continue
+        elif _locate(page, roster.context_sentence_index, roster.context_text) is None:
             log.warn("colisting.rejected", "affiliation heading not found verbatim",
                      url=page.url, affiliation=roster.affiliation[:80])
             continue

@@ -29,7 +29,8 @@ from typing import Any, Iterable, Optional, Sequence
 #: broken when it had simply never been asked for.
 #:   .1  initial
 #:   .2  co-listings added to the extraction prompt and schema
-PROMPT_VERSION = "2026-08-03.2"
+#:   .3  co-listing affiliation may come from the page title (index -1)
+PROMPT_VERSION = "2026-08-03.3"
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +172,12 @@ Partners", "Board of Trustees", "Winter 2021 batch").
 - `affiliation_kind`: one of employer, board, cohort, investors, event, other.
 - `context_sentence_index` and `context_text`: the index and VERBATIM text of \
 the heading or sentence that establishes the shared affiliation. This is what \
-makes the listing meaningful, so it must genuinely say what the group is. If \
-no such line exists on the page, do not report the roster at all.
+makes the listing meaningful, so it must genuinely say what the group is.
+  Many team pages open straight into names, with the organisation named only in \
+the page title. When there is no such line in the numbered sentences but the \
+page title names the organisation, set `context_sentence_index` to -1 and put \
+the page title, copied exactly as given in the metadata block, in \
+`context_text`. If neither exists, do not report the roster at all.
 - `members`: for each person, their resolved full `name`, the \
 `sentence_index` and VERBATIM `span_text` of their own entry in the list, and \
 their `role` if the entry gives one.

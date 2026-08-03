@@ -23,7 +23,7 @@ from artemis.config import Settings
 from artemis.extract.client import ClaudeClient
 from artemis.graph.expand import ExpansionPolicy, SymmetricPolicy
 from artemis.graph.store import GraphStore
-from artemis.identity.normalize import could_be_same_name, looks_canonical_for
+from artemis.identity.normalize import could_be_same_name, fold, looks_canonical_for
 from artemis.identity.pivot import PivotVerdict, PivotVerifier
 from artemis.identity.resolve import (
     IdentityResolver,
@@ -235,11 +235,46 @@ class Connector:
             )
             return None, [self._candidate(c[0]) for c in clusters[:6]]
 
-        best = max(matches, key=lambda n: (len(n.observations), len(n.attributes)))
+        best = max(
+            matches,
+            key=lambda n: (self._context_fit(n, context), len(n.observations), len(n.attributes)),
+        )
         best.endpoint = endpoint
         self.log("seed.selected", best.display_name, node_id=best.node_id,
                  endpoint=endpoint.value, observations=len(best.observations))
         return best.node_id, None
+
+    def _context_fit(self, node: Node, context: Optional[str]) -> int:
+        """How well a candidate matches the disambiguator the caller supplied.
+
+        The caller said which person they meant. Until now that steered the
+        queries but not the choice of node, so with three "Abhimanyu Sharma"
+        nodes at one observation each the seed was picked arbitrarily — and
+        landed on a university academic instead of the Pantheon Prep one.
+
+        Counts attribute matches and source-URL matches, both on significant
+        tokens so "Pantheon Prep" matches pantheonprep.com.
+        """
+        if not context:
+            return 0
+        wanted = {t for t in fold(context).replace(",", " ").split() if len(t) > 2}
+        if not wanted:
+            return 0
+
+        score = 0
+        for values in node.attributes.values():
+            for value in values:
+                if wanted & set(fold(value).split()):
+                    score += 2
+        for url in {o.url for o in node.observations} | node.canonical_urls:
+            folded = fold(url)
+            # Strip separators so "Pantheon Prep" matches pantheonprep.com.
+            compact = folded.replace("-", "").replace(".", "").replace("/", "")
+            if all(w in compact for w in wanted):
+                score += 3
+            elif any(w in folded for w in wanted):
+                score += 1
+        return score
 
     def _candidate(self, node: Node) -> DisambiguationCandidate:
         obs = node.observations[0] if node.observations else None

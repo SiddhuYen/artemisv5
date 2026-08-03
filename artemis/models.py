@@ -253,8 +253,11 @@ class RawCoListing(BaseModel):
 
     affiliation: str  # "Y Combinator Group Partners", "Board of Trustees", ...
     affiliation_kind: str  # employer | board | cohort | investors | event | other
-    context_sentence_index: int = Field(ge=0)
-    context_text: str  # verbatim heading/line establishing the shared affiliation
+    #: Index of the heading establishing the affiliation, or -1 when the page
+    #: states it only in its title. Many team pages open straight into names,
+    #: with the organisation named only in <title> and the URL.
+    context_sentence_index: int = Field(ge=-1)
+    context_text: str  # verbatim heading, or the verbatim page title when index is -1
     members: list["RawCoListingMember"] = Field(default_factory=list)
 
 
