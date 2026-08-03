@@ -273,6 +273,12 @@ _ORG_NAME_MARKERS = frozenset(
         "church", "chapel", "parish", "diocese", "ministries", "temple",
         "synagogue", "mosque", "congregation", "fellowship", "mission",
         "charities", "charity", "orphanage", "shelter", "academy", "seminary",
+        # Media and entertainment companies — "Magnolia Pictures" reached the
+        # graph as a person, and film/TV names are two capitalised words as
+        # often as people's names are.
+        "pictures", "films", "film", "entertainment", "productions",
+        "production", "studios", "broadcasting", "television", "pictures.",
+        "animation", "interactive", "sports", "athletics", "club", "team",
     }
 )
 

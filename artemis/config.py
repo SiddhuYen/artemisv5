@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     #: People consulted in the post-web enrichment phase, closest to an endpoint
     #: first. Providers run once the web crawl has settled, not interleaved.
     provider_people: int = 25
+    #: People looked up concurrently in the enrichment phase. Each provider
+    #: paces itself, so this bounds fan-out, not politeness.
+    provider_concurrency: int = 5
 
     #: Drop grounded edges where neither party is already in the graph. They are
     #: real relationships, but they form islands no path can cross.

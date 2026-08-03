@@ -420,9 +420,26 @@ class Connector:
                  f"{len(self.providers)} providers",
                  providers=[p.name for p in self.providers])
 
+        # Fan out across people. Each provider already paces itself internally
+        # (SEC fair-access sleeps, OpenAlex politeness), so the sequential loop
+        # this replaces was serialising several hundred independent HTTP round
+        # trips — minutes of wall clock on every run for no reason.
+        sem = asyncio.Semaphore(self.s.provider_concurrency)
+
+        async def lookup(person: str, orgs: list[str]) -> list[tuple[str, str]]:
+            async with sem:
+                return await self._structured_urls(person, orgs)
+
+        batches = await asyncio.gather(
+            *(lookup(person, orgs) for person, orgs in targets), return_exceptions=True
+        )
         urls: list[tuple[str, str]] = []
-        for person, orgs in targets:
-            urls += await self._structured_urls(person, orgs)
+        for batch in batches:
+            if isinstance(batch, BaseException):
+                self.log.warn("provider.error", f"{type(batch).__name__}: {batch}")
+                continue
+            urls += batch
+
         await self._ingest(urls)
         self.log("providers.finished", f"{len(urls)} documents discovered")
 
