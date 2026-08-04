@@ -93,6 +93,23 @@ async def console() -> Response:
     return FileResponse(index, headers={"Cache-Control": "no-store"})
 
 
+def _lxml_build() -> dict[str, object]:
+    """Which libxml2 lxml compiled against, and which it actually loaded."""
+    try:
+        from lxml import etree
+
+        compiled = tuple(etree.LIBXML_COMPILED_VERSION)
+        runtime = tuple(etree.LIBXML_VERSION)
+        return {
+            "version": etree.__version__,
+            "libxml2_compiled": ".".join(str(p) for p in compiled),
+            "libxml2_runtime": ".".join(str(p) for p in runtime),
+            "matched": compiled == runtime,
+        }
+    except Exception as exc:  # pragma: no cover
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 @app.get("/health")
 async def health(relations: bool = False) -> dict[str, object]:
     """Liveness, plus enough to tell whether the cache disk is really in play.
@@ -131,6 +148,12 @@ async def health(relations: bool = False) -> dict[str, object]:
         "cache_dir": str(cache_dir),
         "cache_writable": writable,
         "cache_error": cache_error,
+        # A mismatch here means lxml was built against a different libxml2 than
+        # it runs against — the configuration whose concurrent parsing crashed
+        # this container with `double free or corruption (out)`, exit 139. It
+        # leaves no Python traceback, so it has to be visible some other way.
+        "lxml": _lxml_build(),
+        "parse_concurrency": s.parse_concurrency,
     }
     if relations:
         counts = await RelationCache(

@@ -6,14 +6,22 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# lxml / trafilatura need a compiler toolchain for some wheels
+# curl is for the healthcheck. Deliberately NOT libxml2-dev/libxslt1-dev and a
+# compiler: with those present pip will build lxml from source against the
+# system libxml2, and that build segfaulted this container under concurrent
+# parsing — `double free or corruption (out)`, exit 139. lxml ships manylinux
+# wheels with a tested libxml2 statically bundled, so the toolchain bought a
+# riskier build of something we could have had prebuilt.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libxml2-dev libxslt1-dev curl \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
 COPY artemis ./artemis
-RUN pip install --upgrade pip && pip install .
+# --only-binary lxml makes the source fallback a build failure rather than a
+# silent segfault three runs later.
+RUN pip install --upgrade pip \
+    && pip install --only-binary lxml,lxml_html_clean .
 
 RUN useradd --create-home --uid 10001 artemis \
     && mkdir -p /app/.artemis-cache \

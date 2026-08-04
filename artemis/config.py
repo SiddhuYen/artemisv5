@@ -89,6 +89,18 @@ class Settings(BaseSettings):
     fetch_timeout_s: float = 20.0
     fetch_max_retries: int = 2
     fetch_max_bytes: int = 3_000_000
+    #: HTML parses allowed in flight at once. One, because trafilatura,
+    #: readability-lxml and BeautifulSoup(html, "lxml") all bottom out in
+    #: libxml2, and running several concurrently segfaulted the container:
+    #: `double free or corruption (out)`, exit 139. Native heap corruption
+    #: raises no Python exception, so the job log records nothing and the run
+    #: just disappears — which is what it looked like for three runs.
+    #:
+    #: A single worker still keeps parsing off the event loop, which is why it
+    #: was threaded in the first place. Raise it only on a multi-core instance,
+    #: and only after confirming lxml is a binary wheel with matching compiled
+    #: and runtime libxml2 (see /health).
+    parse_concurrency: int = 1
     respect_robots: bool = True
     #: Skip hosts that never serve a usable page, before spending budget, a
     #: robots.txt round trip, or a per-domain delay on them.

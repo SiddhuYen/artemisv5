@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from typing import Optional
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -87,6 +89,24 @@ class Fetcher:
         self._domain_last: dict[str, float] = {}
         self._robots: dict[str, Optional[RobotFileParser]] = {}
         self._robots_lock = asyncio.Lock()
+        # Parsing gets its own pool, sized by parse_concurrency (default 1).
+        #
+        # trafilatura, readability-lxml and BeautifulSoup(html, "lxml") all end
+        # up in libxml2, and asyncio.to_thread put up to fetch_concurrency of
+        # them in flight at once on the shared default executor. That is what
+        # killed the container: `double free or corruption (out)`, SIGSEGV,
+        # exit 139 — a native heap corruption, not a Python exception, so
+        # nothing in the job log records it and the run simply vanishes.
+        #
+        # One worker still keeps the CPU-bound work off the event loop, which is
+        # the whole reason it was moved to a thread; it just stops two of them
+        # being inside libxml2 together. On a one-vCPU instance that costs
+        # essentially nothing, because the parses were contending for one core
+        # anyway.
+        self._parse_pool = ThreadPoolExecutor(
+            max_workers=max(1, int(getattr(settings, "parse_concurrency", 1) or 1)),
+            thread_name_prefix="artemis-parse",
+        )
         self.blocked_domains = frozenset(
             (DEFAULT_BLOCKED_DOMAINS if settings.use_default_blocklist else frozenset())
             | {d.strip().lower() for d in settings.blocked_domains_extra.split(",") if d.strip()}
@@ -120,6 +140,9 @@ class Fetcher:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
+        # Do not wait on in-flight parses: a cancelled crawl is already
+        # unwinding, and a stuck libxml2 call would hold the whole shutdown.
+        self._parse_pool.shutdown(wait=False, cancel_futures=True)
 
     # -- politeness ---------------------------------------------------------
     def _domain_sem(self, host: str) -> asyncio.Semaphore:
@@ -247,12 +270,15 @@ class Fetcher:
         # trafilatura/readability parsing is CPU-bound and was running inline on
         # the event loop: a burst of pages stalled every other coroutine,
         # including the API's own responses to /jobs polling.
-        doc, reason = await asyncio.to_thread(
-            build_document,
-            url=url,
-            final_url=payload.get("final_url", url),
-            html=payload.get("html", ""),
-            max_sentences=self.s.max_sentences_per_page,
+        doc, reason = await asyncio.get_running_loop().run_in_executor(
+            self._parse_pool,
+            partial(
+                build_document,
+                url=url,
+                final_url=payload.get("final_url", url),
+                html=payload.get("html", ""),
+                max_sentences=self.s.max_sentences_per_page,
+            ),
         )
         if doc is None:
             self.log("fetch.skipped", f"unusable page: {reason}", url=url)
