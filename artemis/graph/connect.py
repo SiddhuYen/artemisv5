@@ -128,6 +128,27 @@ class Connector:
             else (request.max_depth or settings.max_depth_b)
         )
 
+    def release(self) -> None:
+        """Drop the crawl's working set once the run is over.
+
+        Cancelling a job leaves `run()`'s coroutine frame alive for the rest of
+        the process — measured on CPython 3.12, and unaffected by dropping the
+        Task or clearing tracebacks — and that frame holds `self`. So the caller
+        cannot free the graph by releasing its own reference to the connector;
+        the connector has to let go of the graph itself. A cancelled run used to
+        strand a full GraphStore per job, which is what walked the container
+        into its memory ceiling.
+
+        Safe only after run() has returned or raised: the result is already
+        built by then, and nothing reads these afterwards.
+        """
+        self.store = GraphStore()
+        self.resolver = None  # type: ignore[assignment]
+        self.pivots = None  # type: ignore[assignment]
+        self.providers = ()
+        self._expanded = set()
+        self._urls_seen = set()
+
     # -- entry point --------------------------------------------------------
     async def run(self) -> Result:
         if not self.claude.enabled:

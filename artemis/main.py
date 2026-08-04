@@ -59,8 +59,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.jobs = InProcessJobRegistry(settings)
     app.state.network = NetworkStore(settings.cache_dir)
-    yield
-    await app.state.jobs.shutdown()
+    app.state.jobs.start_reaper()
+    try:
+        yield
+    finally:
+        # Without the finally an exception through the yield skips shutdown
+        # entirely, and the reaper is still pending when the loop tears down.
+        await app.state.jobs.shutdown()
 
 
 app = FastAPI(

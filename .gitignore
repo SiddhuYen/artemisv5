@@ -11,6 +11,11 @@ venv/
 .artemis-cache/
 *.db
 
+# Exports and reports regenerated from the relation store. Several MB each, and
+# derived rather than source — the same reason the cache above is not tracked.
+cached_connections*.csv
+seed_import_report.json
+
 # Python
 __pycache__/
 *.py[cod]

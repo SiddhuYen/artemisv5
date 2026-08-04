@@ -487,16 +487,47 @@ function openJob(jobId, personA, personB) {
 
 let shownLogLines = 0;
 
+const POLL_MS = 1200;
+// A deploy or an out-of-memory restart makes the gateway answer every poll with
+// its own HTML 502 page until the container is back. Giving up on the first one
+// painted '// LOST THE JOB' — and the raw 502 markup — over runs that were still
+// alive and finished fine. Eight attempts with backoff covers about a minute,
+// which is a restart; longer than that is worth telling the operator about.
+const POLL_MAX_FAILURES = 8;
+let pollFailures = 0;
+// Bumped on every stop and start, so a poll still awaiting its response cannot
+// schedule the next one or repaint after the view has moved on. setInterval
+// could not give us this: it fired again whether or not the previous poll had
+// come back, so two polls of one run could both reach the terminal branch and
+// render the result — and POST /network/match — twice.
+let pollGen = 0;
+
 function startPolling() {
   stopPolling();
-  pollJob();
-  pollTimer = setInterval(pollJob, 1200);
+  pollFailures = 0;
+  pollJob(pollGen);
 }
 function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  pollGen++;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
+function schedulePoll(delayMs, gen) {
+  if (pollTimer) { clearTimeout(pollTimer); }
+  pollTimer = setTimeout(() => pollJob(gen), delayMs);
 }
 
-async function pollJob() {
+// Terminal for this view: no timer, no sweeping progress bar, no cancel button.
+// The old error path left the last two running, so a view that had given up
+// looked exactly like one that was still working.
+function endPolling(label, message) {
+  stopPolling();
+  $('jvCancelBtn').style.display = 'none';
+  $('jvProgress').classList.remove('on');
+  $('jvResultLbl').textContent = label;
+  $('jvResult').innerHTML = `<div class="jv-empty">${esc(message)}</div>`;
+}
+
+async function pollJob(gen) {
   if (!currentJobId) return;
   // A poll already in flight when the user opens a different run would
   // otherwise land afterwards and paint the old job's log and result into
@@ -506,13 +537,33 @@ async function pollJob() {
   try {
     job = await api(`/jobs/${jobId}`);
   } catch (e) {
-    if (currentJobId !== jobId) return;
-    stopPolling();
-    $('jvResultLbl').textContent = '// LOST THE JOB';
-    $('jvResult').innerHTML = `<div class="jv-empty">${esc(e.message)}</div>`;
+    if (currentJobId !== jobId || gen !== pollGen) return;
+    // 404 is the only honest "gone": the registry is a dict in the server
+    // process and deliberately non-durable, so a restart takes every run with
+    // it and no amount of retrying brings one back. Everything else is the
+    // container being briefly unreachable — including a rejected fetch, which
+    // arrives with no .status at all and must not read as permanent.
+    if (e.status === 404) {
+      endPolling('// RUN GONE', 'The server no longer has this run. It was restarted or redeployed, and run history is held in memory only.');
+      return;
+    }
+    pollFailures++;
+    if (pollFailures >= POLL_MAX_FAILURES) {
+      const seen = e.status ? `HTTP ${e.status}` : 'no response';
+      endPolling('// LOST THE JOB', `No contact with the server after ${pollFailures} attempts (${seen}). The run itself may still be going — reopen it from the console to check.`);
+      return;
+    }
+    $('jvResultLbl').textContent = `// RECONNECTING — ATTEMPT ${pollFailures} OF ${POLL_MAX_FAILURES}`;
+    // Capped so a long outage keeps probing every ten seconds or so instead of
+    // drifting out to minute-long gaps and missing the recovery.
+    schedulePoll(POLL_MS * Math.min(1 << pollFailures, 8), gen);
     return;
   }
-  if (currentJobId !== jobId) return;
+  if (currentJobId !== jobId || gen !== pollGen) return;
+  if (pollFailures) {
+    pollFailures = 0;
+    $('jvResultLbl').textContent = '// AWAITING RESULT';
+  }
   renderJobStatus(job);
   renderJobLog(job);
   renderJobStats(job);
@@ -526,6 +577,7 @@ async function pollJob() {
   } else {
     $('jvCancelBtn').style.display = '';
     $('jvProgress').classList.add('on');
+    schedulePoll(POLL_MS, gen);
   }
 }
 
@@ -588,7 +640,9 @@ async function cancelJob() {
   try {
     await api(`/jobs/${currentJobId}`, { method: 'DELETE' });
     toast('Run cancelled.');
-    pollJob();
+    // Restart the chain rather than firing a bare poll: it picks up the new
+    // status immediately and stops itself once the run reports terminal.
+    startPolling();
   } catch (e) {
     toast('Could not cancel: ' + e.message, 'err');
   }

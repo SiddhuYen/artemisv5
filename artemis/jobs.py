@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 from typing import Optional, Protocol
 
 from artemis.config import Settings
@@ -29,6 +30,13 @@ from artemis.scrape.fetcher import Fetcher
 from artemis.search.serper import SerperProvider, SerperUnavailable
 
 
+#: Terminal for retention purposes. The reaper must never touch QUEUED or
+#: RUNNING: _run captures `state` as a local and the sink closure holds it, so
+#: evicting a live job orphans a task that keeps crawling — still spending
+#: Serper credits and Claude calls — where cancel() can no longer reach it.
+_TERMINAL = frozenset({JobStatus.DONE, JobStatus.FAILED})
+
+
 class JobStore(Protocol):
     async def submit(self, request: ConnectRequest) -> str: ...
     def get(self, job_id: str) -> Optional[JobState]: ...
@@ -43,6 +51,11 @@ class InProcessJobRegistry:
         self.s = settings
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._reaper: Optional[asyncio.Task[None]] = None
+        # Swept at a twentieth of the retention window, floored so tests with a
+        # tiny retention still sweep and ceilinged at five minutes so a six-hour
+        # retention does not mean a six-hour lag before anything is freed.
+        self._reap_every_s = max(1.0, min(300.0, settings.job_retention_s / 20))
         self.cache = DiskCache(
             settings.cache_dir, enabled=settings.cache_enabled, ttl_s=settings.cache_ttl_s
         )
@@ -88,14 +101,66 @@ class InProcessJobRegistry:
         task.cancel()
         return True
 
+    def start_reaper(self) -> None:
+        """Begin enforcing job_retention_s. Idempotent; needs a running loop."""
+        if self._reaper is None or self._reaper.done():
+            self._reaper = asyncio.create_task(self._reap_forever())
+
     async def shutdown(self) -> None:
-        for task in list(self._tasks.values()):
+        if self._reaper is not None:
+            self._reaper.cancel()
+            try:
+                await self._reaper
+            except asyncio.CancelledError:
+                pass
+            self._reaper = None
+        # Snapshot: cancelling can complete a task synchronously, and mutating
+        # _tasks between the cancel pass and the gather would leave a task
+        # cancelled but never awaited.
+        pending = list(self._tasks.values())
+        for task in pending:
             task.cancel()
-        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    # -- retention ----------------------------------------------------------
+    def reap(self) -> int:
+        """Drop finished jobs past their retention. Returns how many went.
+
+        Both dicts, deliberately. A JobState is ~4.3 MB once its log is full,
+        and a *cancelled* task pins its whole coroutine frame — connector,
+        graph, fetcher — for as long as the Task object is reachable.
+        """
+        cutoff = utcnow() - timedelta(seconds=self.s.job_retention_s)
+        stale = [
+            job_id
+            for job_id, state in self._jobs.items()
+            if state.status in _TERMINAL and state.updated_at <= cutoff
+        ]
+        for job_id in stale:
+            self._jobs.pop(job_id, None)
+            task = self._tasks.pop(job_id, None)
+            # Retrieve the exception so dropping the Task does not trip
+            # asyncio's "Task exception was never retrieved" on GC. A cancelled
+            # task re-raises CancelledError from .exception(), so skip those.
+            if task is not None and task.done() and not task.cancelled():
+                task.exception()
+        return len(stale)
+
+    async def _reap_forever(self) -> None:
+        while True:
+            await asyncio.sleep(self._reap_every_s)
+            try:
+                self.reap()
+            except Exception:  # pragma: no cover - defensive
+                # This loop runs for the life of the process. One bad sweep
+                # must not silently end retention for every job after it.
+                pass
 
     # -- execution ----------------------------------------------------------
     async def _run(self, job_id: str, request: ConnectRequest) -> None:
-        state = self._jobs[job_id]
+        state = self._jobs.get(job_id)
+        if state is None:  # reaped or deleted before the task got its first step
+            return
         state.status = JobStatus.RUNNING
         state.updated_at = utcnow()
 
@@ -104,8 +169,12 @@ class InProcessJobRegistry:
         # as soon as they start happening.
         holder: dict[str, object] = {"resolver": None}
 
-        def sink(entry: LogEntry) -> None:
-            state.log.append(entry)
+        def sink(_entry: LogEntry) -> None:
+            # No append here: state.log IS log.entries (bound below), so the
+            # entry has already landed and is subject to max_entries. Appending
+            # a second copy was what made the live log unbounded — JobLog capped
+            # its own list but called the sink regardless, so a 12k-event crawl
+            # carried 12k entries in memory and only shrank to 5k when it ended.
             resolver = holder["resolver"]
             state.stats = ledger.snapshot(
                 merges=getattr(resolver, "merges", 0),
@@ -114,6 +183,10 @@ class InProcessJobRegistry:
             state.updated_at = utcnow()
 
         log = JobLog(sink=sink, max_entries=self.s.max_log_entries_per_job)
+        # One list, not two. Bound up front rather than only in the finally, so
+        # a job that is still running is already capped instead of being trimmed
+        # to size the moment it ends.
+        state.log = log.entries
         budget = request.budget
         ledger = BudgetLedger(
             max_serper_credits=(budget.max_serper_credits if budget else None)
@@ -126,6 +199,7 @@ class InProcessJobRegistry:
             wall_clock_s=(budget.wall_clock_s if budget else None) or self.s.wall_clock_s,
         )
 
+        claude = connector = result = None
         try:
             claude = ClaudeClient(self.s, self.cache, ledger, log)
             async with SerperProvider(self.s, self.cache, ledger, log) as provider, Fetcher(
@@ -168,3 +242,16 @@ class InProcessJobRegistry:
             state.updated_at = utcnow()
             if state.stats == Stats():
                 state.stats = ledger.snapshot()
+            # Cancelling a task pins its coroutine frame — and everything local
+            # to it — even after the Task object is dropped. Measured on CPython
+            # 3.12: a normally-finished coroutine frees at once, one that raised
+            # frees when the Task goes, but a cancelled one never does. The
+            # connector owns the whole crawl graph, so every cancelled run
+            # leaked a graph for the life of the process. Releasing the names
+            # here is what actually frees them; clearing tracebacks does not.
+            holder["resolver"] = None
+            if connector is not None:
+                # Releasing our own name is not enough: run()'s frame holds the
+                # connector, so the connector must drop the graph itself.
+                connector.release()
+            claude = connector = result = None  # noqa: F841 - frees the frame
