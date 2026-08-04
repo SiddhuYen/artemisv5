@@ -399,6 +399,61 @@ class ClaudeClient:
             angle = "generic"
         return angle, str(data.get("why", ""))[:300]
 
+    async def choose_frontier(
+        self,
+        candidates: Sequence[dict[str, Any]],
+        target: str,
+        target_attributes: dict[str, list[str]],
+    ) -> tuple[list[str], str]:
+        """Rank candidate ids by likelihood of reaching `target`.
+
+        Returns (ordered_ids, why). The caller's order is authoritative on
+        anything this does not rank: unknown ids are dropped and omitted ones
+        are appended in their original order, so a partial or hallucinated
+        answer degrades to the heuristic rather than losing candidates.
+
+        Advisory only. A wrong ranking spends the level on worse candidates; it
+        cannot introduce a claim about anyone, because expansion still grounds
+        every edge the same way.
+        """
+        ids = [str(c.get("id", "")) for c in candidates if c.get("id")]
+        if len(ids) < 2:
+            return ids, "nothing to rank"
+        if not self.enabled or not self.s.strategy_enabled:
+            return ids, "frontier ranking disabled"
+        if not any(target_attributes.values()):
+            # Same refusal as choose_angle: with nothing grounded about the
+            # target there is nothing to rank proximity against, and the model
+            # would fall back to whoever it recognises — which is prominence,
+            # the bias this exists to correct.
+            return ids, "no grounded attributes for the target"
+
+        payload = json.dumps(
+            {"target": target, "target_attributes": target_attributes,
+             "candidates": list(candidates)},
+            ensure_ascii=False, sort_keys=True, indent=2,
+        )
+        data = await self._call_json(
+            model=self.s.strategy_model,
+            system=prompts.FRONTIER_SYSTEM_PROMPT,
+            user=payload,
+            schema=prompts.FRONTIER_JSON_SCHEMA,
+            max_tokens=2000,
+            cache_key=f"frontier|{prompts.PROMPT_VERSION}|{self.s.strategy_model}|"
+                      f"{content_hash(payload)}",
+        )
+        if not data:
+            return ids, "frontier ranking unavailable"
+
+        allowed = set(ids)
+        seen: set[str] = set()
+        ordered = [
+            str(x) for x in (data.get("ranked") or [])
+            if str(x) in allowed and not (str(x) in seen or seen.add(str(x)))
+        ]
+        ordered += [i for i in ids if i not in seen]
+        return ordered, str(data.get("why", ""))[:300]
+
     async def verify_pivot(
         self, name: str, arriving: dict[str, Any], leaving: dict[str, Any]
     ) -> Verdict:

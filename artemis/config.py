@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     max_depth_a: int = 2
     max_depth_b: int = 1
     frontier_cap_per_level: int = 12
+    #: Let the strategy model order each level's candidates by likelihood of
+    #: reaching the target, instead of by how many sources mention them.
+    #: Recurrence is a proxy for prominence, so unaided the crawl prefers Steve
+    #: Jobs over a mid-profile investor who actually bridges. One call per level.
+    frontier_selection_enabled: bool = True
+    #: Candidates handed to that call. Larger than frontier_cap_per_level on
+    #: purpose: ranking only what the heuristic already admitted would hide the
+    #: low-coverage bridge this exists to find. Bounds prompt size on a level
+    #: that fans out to hundreds, and the trim is logged rather than silent.
+    frontier_rank_pool: int = 40
     fetch_top_n_per_node: int = 6
     max_routes_returned: int = 5
     #: End the run the moment a route is confirmed, without being asked. Off by

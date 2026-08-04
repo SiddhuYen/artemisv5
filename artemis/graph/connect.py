@@ -17,7 +17,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from artemis.config import Settings
 from artemis.extract.client import ClaudeClient
@@ -428,14 +428,21 @@ class Connector:
             # to reach: A is hunting B, so it follows B's notability, and vice
             # versa.
             if level < self.depth_a:
+                # A is hunting B, so B is what its candidates are ranked toward.
                 frontier += [
                     (n, Endpoint.A)
-                    for n in self._frontier(ta, level, toward_famous=self._b_is_famous)
+                    for n in await self._frontier(
+                        ta, level, toward_famous=self._b_is_famous,
+                        target_node_id=seed_b, target_name=self.req.person_b,
+                    )
                 ]
             if level < self.depth_b:
                 frontier += [
                     (n, Endpoint.B)
-                    for n in self._frontier(tb, level, toward_famous=self._a_is_famous)
+                    for n in await self._frontier(
+                        tb, level, toward_famous=self._a_is_famous,
+                        target_node_id=seed_a, target_name=self.req.person_a,
+                    )
                 ]
 
             frontier = [(n, e) for n, e in frontier if n not in self._expanded]
@@ -459,15 +466,70 @@ class Connector:
             level += 1
         return False
 
-    def _frontier(self, t: Traversal, level: int, *, toward_famous: bool = True) -> list[str]:
+    async def _frontier(
+        self,
+        t: Traversal,
+        level: int,
+        *,
+        toward_famous: bool = True,
+        target_node_id: Optional[str] = None,
+        target_name: str = "",
+    ) -> list[str]:
         scored = [
             (node_id, len({o.url for o in node.observations}))
             for node_id, depth in t.dist.items()
             if depth == level and (node := self.store.get(node_id)) is not None
         ]
-        return self.policy.rank_frontier(
-            scored, self.s.frontier_cap_per_level, toward_famous=toward_famous
+        cap = self.s.frontier_cap_per_level
+        heuristic = self.policy.rank_frontier(scored, cap, toward_famous=toward_famous)
+        if not self.s.frontier_selection_enabled or len(scored) < 2:
+            return heuristic
+
+        # Rank BEFORE the cap, not after. The heuristic orders by how many
+        # distinct sources mention someone, which is prominence — so ranking
+        # only what it already admitted would hide exactly the candidate this
+        # exists to find: a modest bridge into the target's world.
+        pool = self.policy.rank_frontier(
+            scored, self.s.frontier_rank_pool, toward_famous=toward_famous
         )
+        if len(scored) > len(pool):
+            self.log(
+                "frontier.pool_capped",
+                f"ranking {len(pool)} of {len(scored)} candidates at level {level}",
+                candidates=len(scored), ranked=len(pool),
+            )
+
+        candidates = [c for c in (self._candidate_facts(n) for n in pool) if c]
+        target_attributes: dict[str, list[str]] = {}
+        if target_node_id and (node := self.store.get(target_node_id)) is not None:
+            target_attributes = {k: sorted(v) for k, v in node.attributes.items() if v}
+            target_name = target_name or node.display_name
+
+        ordered, why = await self.claude.choose_frontier(
+            candidates, target_name, target_attributes
+        )
+        if ordered[:cap] != pool[:cap]:
+            self.log(
+                "frontier.reranked",
+                why or f"reordered {len(ordered)} candidates toward {target_name}",
+                target=target_name, top=[self._display(n) for n in ordered[:3]],
+            )
+        return ordered[:cap] or heuristic
+
+    def _candidate_facts(self, node_id: str) -> Optional[dict[str, Any]]:
+        node = self.store.get(node_id)
+        if node is None:
+            return None
+        return {
+            "id": node_id,
+            "name": node.display_name,
+            "attributes": {k: sorted(v)[:4] for k, v in node.attributes.items() if v},
+            "sources": len({o.url for o in node.observations}),
+        }
+
+    def _display(self, node_id: str) -> str:
+        node = self.store.get(node_id)
+        return node.display_name if node else node_id
 
     async def _expand(self, frontier: list[tuple[str, Endpoint]]) -> None:
         queries: list[Query] = []
