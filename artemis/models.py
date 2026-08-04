@@ -618,11 +618,48 @@ class LogEntry(BaseModel):
         return iso_z(v)
 
 
+class TrackedNode(BaseModel):
+    """One person the search is holding, and what it decided about them."""
+
+    node_id: str
+    name: str
+    #: Position after ranking. 1 is the best candidate at this tier.
+    rank: int
+    #: Distinct source URLs mentioning them — the old prominence signal, kept
+    #: visible so a reader can see when ranking disagreed with it.
+    sources: int = 0
+    #: Why the ranker put them here, when it said.
+    why: str = ""
+    expanded: bool = False
+    #: Whether this person plausibly reaches the target: yes / no / unknown.
+    reaches_target: Optional[str] = None
+    reaches_target_why: str = ""
+
+
+class SearchTier(BaseModel):
+    """One breadth-first tier: who was expanded, and who that surfaced."""
+
+    level: int
+    label: str
+    #: People expanded to produce this tier's candidates.
+    parents: list[str] = Field(default_factory=list)
+    candidates: list[TrackedNode] = Field(default_factory=list)
+    #: How many were found before the per-tier cap.
+    found: int = 0
+    kept: int = 0
+    status: str = "running"
+
+
 class JobState(BaseModel):
     id: str
     status: JobStatus = JobStatus.QUEUED
     request: ConnectRequest
     log: list[LogEntry] = Field(default_factory=list)
+    #: Breadth-first structure of the search, for the console's node tracker.
+    #: The log is a flat stream of every query, fetch and merge — accurate but
+    #: unreadable as a picture of where the search actually is. This is that
+    #: picture: which tier, who is in it, and what was decided about them.
+    tiers: list[SearchTier] = Field(default_factory=list)
     result: Optional[Result] = None
     #: Published mid-crawl so the console can offer the choice between taking
     #: this route and waiting for a shorter one. Cleared when `result` lands.
@@ -647,6 +684,8 @@ class JobView(BaseModel):
     status: JobStatus
     log: list[LogEntry]
     result: Optional[Result] = None
+    #: Breadth-first view of the search for the console's node tracker.
+    tiers: list[SearchTier] = Field(default_factory=list)
     #: Routes found so far, while the crawl is still looking for a shorter one.
     #: Empty once `result` is set — at that point the ranked set is authoritative.
     preview_routes: list[Route] = Field(default_factory=list)

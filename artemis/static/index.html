@@ -306,6 +306,14 @@
 
       <div id="jvWarnings"></div>
 
+      <!-- Where the search *is*, above where it has *been*. Hidden until the
+           run reports tiers: a bidirectional run publishes none, and neither
+           does a run started before the tracker existed. -->
+      <div class="bvr-thinking" id="jvTrackerBox" style="display:none">
+        <div class="bvr-thinking-hdr">// NODE TRACKER</div>
+        <div class="bvr-thinking-log jv-tracker" id="jvTracker"></div>
+      </div>
+
       <div class="bvr-thinking" style="display:block">
         <div class="bvr-thinking-hdr">// ARTEMIS THINKING — EVERY QUERY, FETCH, GROUNDING, AND MERGE DECISION</div>
         <div class="bvr-thinking-log jv-log" id="jvLog"></div>

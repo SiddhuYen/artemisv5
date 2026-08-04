@@ -22,6 +22,7 @@ from artemis.models import (
     LogEntry,
     Result,
     Route,
+    SearchTier,
     Stats,
     utcnow,
 )
@@ -208,6 +209,13 @@ class InProcessJobRegistry:
             state.preview_routes = list(routes)
             state.updated_at = utcnow()
 
+        def publish_tiers(tiers: list[SearchTier]) -> None:
+            # Copied, not aliased: the connector keeps mutating its own list as
+            # the next tier fills, and a poll must never serialise a tier while
+            # it is half-rebuilt.
+            state.tiers = [t.model_copy(deep=True) for t in tiers]
+            state.updated_at = utcnow()
+
         log = JobLog(sink=sink, max_entries=self.s.max_log_entries_per_job)
         # One list, not two. Bound up front rather than only in the finally, so
         # a job that is still running is already capped instead of being trimmed
@@ -235,6 +243,7 @@ class InProcessJobRegistry:
                     request, self.s, provider, fetcher, claude, ledger, log,
                     control=RunControl(
                         on_routes=publish_routes,
+                        on_tiers=publish_tiers,
                         stop_requested=lambda: job_id in self._finish_requested,
                     ),
                 )

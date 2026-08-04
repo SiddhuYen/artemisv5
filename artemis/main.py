@@ -198,6 +198,7 @@ async def get_job(job_id: str) -> JobView:
         status=state.status,
         log=state.log,
         result=state.result,
+        tiers=state.tiers,
         preview_routes=state.preview_routes,
         warnings=state.warnings,
         stats=state.stats,

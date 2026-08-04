@@ -44,12 +44,22 @@ class RunControl:
 
     #: Called with the ranked routes each time the set changes. Must not raise.
     on_routes: Callable[[Any], None] = lambda routes: None
+    #: Called with the search's tiers as they fill. Same contract as on_routes:
+    #: the console polls every 1.2s and needs to see the tier being worked on,
+    #: not a structure that only appears once the run is over.
+    on_tiers: Callable[[Any], None] = lambda tiers: None
     #: Polled at every route checkpoint. True means finish now and return.
     stop_requested: Callable[[], bool] = lambda: False
 
     def publish(self, routes: Any) -> None:
         try:
             self.on_routes(routes)
+        except Exception:  # pragma: no cover - a console update is never fatal
+            pass
+
+    def publish_tiers(self, tiers: Any) -> None:
+        try:
+            self.on_tiers(tiers)
         except Exception:  # pragma: no cover - a console update is never fatal
             pass
 

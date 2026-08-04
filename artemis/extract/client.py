@@ -510,6 +510,91 @@ class ClaudeClient:
         ordered += [i for i in ids if i not in seen]
         return ordered, str(data.get("why", ""))[:300]
 
+    async def assess_reachability(
+        self,
+        candidates: Sequence[dict[str, Any]],
+        target: str,
+        target_attributes: dict[str, list[str]],
+    ) -> list[tuple[str, Answer, str]]:
+        """[(id, "yes"|"no"|"unknown", why)] — which candidates lead to `target`.
+
+        Every candidate comes back, in the order given, whatever happens: no
+        key, strategy disabled, a failed or malformed call, a batch that hit the
+        call cap, an answer naming ids that were never sent. All of those land
+        as "unknown", which the caller still pursues — losing a candidate here
+        would silently delete a person from the search.
+
+        Batched because the staged strategy asks about ~144 people at once and
+        one call each would be 144 calls; `reachability_max_calls` bounds the
+        rest. Advisory only, exactly like choose_frontier: this reorders what
+        gets searched next and can introduce no claim about anyone.
+        """
+        ids = [str(c.get("id", "")) for c in candidates if c.get("id")]
+        verdicts: dict[str, tuple[Answer, str]] = {}
+
+        def fill(reason: str) -> list[tuple[str, Answer, str]]:
+            return [(i, verdicts.get(i, ("unknown", reason))[0],
+                     verdicts.get(i, ("unknown", reason))[1]) for i in ids]
+
+        if not ids:
+            return []
+        if not self.enabled or not self.s.strategy_enabled:
+            return fill("reachability assessment disabled")
+        if not any(target_attributes.values()):
+            # Same refusal as choose_frontier: with nothing grounded about the
+            # target there is nothing to judge proximity against, and the model
+            # would answer from whoever it recognises — which is prominence,
+            # the bias this exists to correct.
+            return fill("no grounded attributes for the target")
+
+        by_id = {str(c.get("id", "")): c for c in candidates if c.get("id")}
+        size = max(1, self.s.reachability_batch_size)
+        batches = [ids[i : i + size] for i in range(0, len(ids), size)]
+        allowed = max(0, self.s.reachability_max_calls)
+        if len(batches) > allowed:
+            self.log.warn(
+                "reachability.capped",
+                f"{len(ids)} candidates need {len(batches)} calls; "
+                f"reachability_max_calls is {allowed} — the rest stay unknown "
+                "and are still pursued by rank",
+                candidates=len(ids), batches=len(batches), allowed=allowed,
+            )
+            batches = batches[:allowed]
+
+        for batch in batches:
+            payload = json.dumps(
+                {"target": target, "target_attributes": target_attributes,
+                 "candidates": [by_id[i] for i in batch]},
+                ensure_ascii=False, sort_keys=True, indent=2,
+            )
+            data = await self._call_json(
+                model=self.s.strategy_model,
+                system=prompts.REACHABILITY_SYSTEM_PROMPT,
+                user=payload,
+                schema=prompts.REACHABILITY_JSON_SCHEMA,
+                max_tokens=4000,
+                cache_key=f"reachability|{prompts.PROMPT_VERSION}|{self.s.strategy_model}|"
+                          f"{content_hash(payload)}",
+            )
+            if not data:
+                continue  # this batch stays unknown; the others still get answers
+
+            batch_ids = set(batch)
+            for item in data.get("assessments") or []:
+                if not isinstance(item, dict):
+                    continue
+                node_id = str(item.get("id", ""))
+                # An id from another batch, or one the model invented, is not a
+                # verdict about anybody we asked about.
+                if node_id not in batch_ids or node_id in verdicts:
+                    continue
+                answer = str(item.get("reaches", "unknown")).lower()
+                if answer not in ("yes", "no", "unknown"):
+                    answer = "unknown"
+                verdicts[node_id] = (answer, str(item.get("why", ""))[:200])  # type: ignore[arg-type]
+
+        return fill("not assessed")
+
     async def verify_pivot(
         self, name: str, arriving: dict[str, Any], leaving: dict[str, Any]
     ) -> Verdict:

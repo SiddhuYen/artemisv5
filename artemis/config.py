@@ -114,6 +114,32 @@ class Settings(BaseSettings):
     extraction_concurrency: int = 4
 
     # --- expansion ---------------------------------------------------------
+    #: How the crawl is shaped.
+    #:   bidirectional — expand both endpoints, meet in the middle. Cheapest way
+    #:     to a short route when both people have public networks.
+    #:   staged — one direction only, bottom-up: expand the origin, keep the
+    #:     best of what it surfaced, expand each of those and keep the best of
+    #:     each, then ask which of the survivors plausibly reach the target and
+    #:     pursue only those. Costs more per level and reaches a target whose
+    #:     own side of the web is thin, where expanding B finds nothing to meet.
+    #: Anything unrecognised runs bidirectional; the choice is logged either way.
+    search_strategy: str = "bidirectional"
+    #: staged tier 1: candidates kept from EACH expanded tier-0 parent. With
+    #: frontier_cap_per_level=12 parents that is up to 144 people held before
+    #: the reachability pass narrows them.
+    staged_keep_per_parent: int = 12
+    #: staged tier 2: how many of the assessed candidates get expanded. Ordered
+    #: "yes" first, then "unknown" — a "no" is never pursued, and an all-unknown
+    #: assessment (degraded) falls back to rank order, so nothing is dropped.
+    staged_pursue_cap: int = 12
+    #: Candidates per assess_reachability call. 144 candidates in one prompt is
+    #: one answer the model has to keep 144 ids straight in; batching also means
+    #: a single failed call costs 40 verdicts, not all of them.
+    reachability_batch_size: int = 40
+    #: Ceiling on those calls per job, so a tier that fans out past the plan
+    #: cannot turn into an unbounded number of them. Candidates past the last
+    #: call are reported "unknown" and still pursued by rank.
+    reachability_max_calls: int = 6
     # Asymmetric depth budget only: A expands two levels, B one, so routes top
     # out at three hops. The expansion policy itself is symmetric.
     max_depth_a: int = 2

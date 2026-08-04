@@ -1090,6 +1090,35 @@ body {
 .jv-log-line.l-warning .evt,.jv-log-line.l-warning .ms { color:oklch(0.75 0.14 75); }
 .jv-log-line.l-error .evt,.jv-log-line.l-error .ms { color:oklch(0.72 0.19 30); }
 
+/* ── NODE TRACKER ──
+   Same terminal frame as the log, because it is the same run — the log is the
+   decisions in order, this is the shape they made. Taller than the log's 300px
+   because a tier header plus its top rows is one unit and splitting it across
+   a scroll costs the reader the tier they were reading. */
+.jv-tracker { max-height:360px; }
+.jv-tier { border-bottom:1px solid var(--accent-line2);padding:9px 0; }
+.jv-tier:first-child { padding-top:1px; }
+.jv-tier:last-child { border-bottom:0;padding-bottom:1px; }
+.jv-tier-hdr { display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:4px; }
+.jv-tier-lbl { font-size:11px;letter-spacing:0.2em;color:var(--ink-dim); }
+.jv-tier-meta { font-size:9px;letter-spacing:0.14em;color:var(--ink-faint);line-height:1.8;
+  margin-bottom:5px;word-break:break-word; }
+.jv-cand { display:flex;align-items:baseline;gap:9px;font-size:10px;line-height:1.7;
+  padding:2px 0 2px 7px;border-left:1px solid transparent; }
+.jv-cand .rk { flex:none;width:24px;text-align:right;color:var(--accent-dim);letter-spacing:0.04em; }
+.jv-cand .nm { flex:none;color:var(--ink-dim);letter-spacing:0.05em; }
+.jv-cand .src { flex:none;font-size:8px;letter-spacing:0.16em;color:var(--ink-faint); }
+.jv-cand .why { flex:1;min-width:140px;color:var(--ink-mute);word-break:break-word; }
+/* "yes" is the entire question the tracker answers — who might reach the
+   target — so it is the only row that gets the accent rail, and "no" is
+   dimmed rather than hidden so the reader can see it was considered. */
+.jv-cand.reach-yes { border-left-color:var(--accent);background:oklch(0.10 0.010 var(--ah)/0.6); }
+.jv-cand.reach-yes .nm { color:var(--ink);text-shadow:0 0 10px var(--accent-glow); }
+.jv-cand.reach-no { opacity:0.5; }
+.jv-more { margin:5px 0 0 7px;padding:3px 9px;background:transparent;border:1px solid var(--accent-line2);
+  color:var(--ink-mute);font-family:inherit;font-size:8px;letter-spacing:0.16em;cursor:pointer; }
+.jv-more:hover { border-color:var(--accent);color:var(--accent-bright); }
+
 /* ── ROUTES & EVIDENCE ── */
 .rte { border:1px solid var(--accent-line2);margin-bottom:20px;background:oklch(0.13 0.012 var(--ah)/0.45); }
 .rte-top { display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--accent-line2); }

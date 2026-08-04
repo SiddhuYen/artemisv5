@@ -473,10 +473,15 @@ function openJob(jobId, personA, personB) {
   currentJobId = jobId;
   shownLogLines = 0;
   previewAnswered = false;
+  trackerOpen.clear();
+  trackerSig = '';
+  trackerTiers = [];
   $('jvA').textContent = personA || '—';
   $('jvB').textContent = personB || '—';
   $('jvJobId').textContent = jobId;
   $('jvLog').innerHTML = '';
+  $('jvTracker').innerHTML = '';
+  $('jvTrackerBox').style.display = 'none';
   $('jvResult').innerHTML = '';
   $('jvWarnings').innerHTML = '';
   $('jvStats').innerHTML = '';
@@ -567,6 +572,7 @@ async function pollJob(gen) {
   }
   renderJobStatus(job);
   renderJobLog(job);
+  renderNodeTracker(job);
   renderJobStats(job);
 
   if (job.status === 'done' || job.status === 'failed') {
@@ -657,6 +663,113 @@ function renderJobLog(job) {
   el.appendChild(frag);
   shownLogLines = log.length;
   el.scrollTop = el.scrollHeight;
+}
+
+// ══════════════════════════════════════════════════════
+// NODE TRACKER — the search as a shape, not as a stream
+//
+// The log above it is every query, fetch and merge in the order they happened:
+// hundreds of lines, correct, and no help at all in seeing which tier the crawl
+// is on or who it is holding. This renders job.tiers instead — per tier, who was
+// expanded to produce it and who that surfaced, in rank order.
+// ══════════════════════════════════════════════════════
+
+// A tier can carry 144 candidates. Twelve is about a screen of rows, and the
+// ranker's whole claim is that the top of its order is where to look — so the
+// rest is one click away rather than dumped, and the count is always stated.
+const TRACKER_HEAD = 12;
+const trackerOpen = new Set();   // tier levels the operator opened
+let trackerTiers = [];           // last payload, so a toggle can repaint without a fetch
+let trackerSig = '';
+
+const REACH = {
+  // [row class, pill class, label]
+  yes: ['reach-yes', 'done', '◆ REACHES TARGET'],
+  no: ['reach-no', '', '✕ NO REACH'],
+  unknown: ['', '', '? REACH UNKNOWN'],
+};
+
+function renderNodeTracker(job) {
+  const tiers = (job && job.tiers) || [];
+  const box = $('jvTrackerBox');
+  // Bidirectional runs publish no tiers, and neither does a run that predates
+  // the tracker. An empty titled box reads as a tracker that broke.
+  if (!tiers.length) {
+    box.style.display = 'none';
+    $('jvTracker').innerHTML = '';
+    trackerTiers = [];
+    trackerSig = '';
+    return;
+  }
+  trackerTiers = tiers;
+  // Most polls change nothing here, and repainting anyway drops whatever the
+  // operator was scrolled to or about to click. The comparison is exact rather
+  // than a digest because it is not worth being clever about: measured 0.07 ms
+  // to stringify a 157-candidate payload, against 0.21 ms just to rebuild its
+  // markup — before the browser parses any of it.
+  const sig = JSON.stringify(tiers) + '|' + [...trackerOpen].join(',');
+  if (sig === trackerSig) return;
+  trackerSig = sig;
+  const el = $('jvTracker');
+  const scrolled = el.scrollTop;
+  box.style.display = 'block';
+  el.innerHTML = tiers.map(renderTier).join('');
+  el.scrollTop = scrolled;
+}
+
+function toggleTier(level) {
+  if (trackerOpen.has(level)) trackerOpen.delete(level);
+  else trackerOpen.add(level);
+  renderNodeTracker({ tiers: trackerTiers });
+}
+
+function renderTier(tier) {
+  // Coerced, not escaped, because it goes into an onclick as a number.
+  const level = Number(tier.level) || 0;
+  // A copy: the payload is the poll's, and sorting it in place would reorder
+  // what the next signature is computed from.
+  const candidates = (tier.candidates || []).slice()
+    .sort((a, b) => (Number(a.rank) || 0) - (Number(b.rank) || 0));
+  const open = trackerOpen.has(level);
+  const shown = open ? candidates : candidates.slice(0, TRACKER_HEAD);
+  // Whitelisted rather than interpolated: a class name is not a text node.
+  const statusClass = tier.status === 'done' ? 'done' : tier.status === 'running' ? 'running' : '';
+  const parents = (tier.parents || []).join(' · ');
+
+  let more = '';
+  if (candidates.length > shown.length) {
+    more = `<button class="jv-more" onclick="toggleTier(${level})">▸ SHOWING ${shown.length} OF ${candidates.length} — SHOW ALL</button>`;
+  } else if (open && candidates.length > TRACKER_HEAD) {
+    more = `<button class="jv-more" onclick="toggleTier(${level})">▾ SHOWING ALL ${candidates.length} — SHOW TOP ${TRACKER_HEAD}</button>`;
+  }
+
+  return `<div class="jv-tier">
+    <div class="jv-tier-hdr">
+      <span class="jv-tier-lbl">${esc(String(tier.label || `TIER ${level}`).toUpperCase())}</span>
+      <span class="pill ${statusClass}">${esc(String(tier.status || '').toUpperCase()) || '—'}</span>
+      <span class="pill">FOUND ${Number(tier.found) || 0}</span>
+      <span class="pill">KEPT ${Number(tier.kept) || 0}</span>
+    </div>
+    ${parents ? `<div class="jv-tier-meta">EXPANDED FROM: ${esc(parents)}</div>` : ''}
+    ${shown.length
+      ? shown.map(renderCandidate).join('')
+      : '<div class="jv-tier-meta">// NO CANDIDATES YET</div>'}
+    ${more}
+  </div>`;
+}
+
+function renderCandidate(node) {
+  const reach = REACH[String(node.reaches_target || '').toLowerCase()];
+  const why = node.why || '';
+  const reachWhy = node.reaches_target_why || '';
+  return `<div class="jv-cand${reach && reach[0] ? ' ' + reach[0] : ''}">
+    <span class="rk">${Number(node.rank) || 0}</span>
+    <span class="nm" title="${esc(node.node_id)}">${esc(node.name)}</span>
+    <span class="src">${Number(node.sources) || 0} SRC</span>
+    ${node.expanded ? '<span class="pill">EXPANDED</span>' : ''}
+    ${reach ? `<span class="pill${reach[1] ? ' ' + reach[1] : ''}">${reach[2]}</span>` : ''}
+    <span class="why">${esc(why)}${reachWhy ? ` · ${esc(reachWhy)}` : ''}</span>
+  </div>`;
 }
 
 const STAT_FIELDS = [

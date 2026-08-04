@@ -50,6 +50,8 @@ from artemis.models import (
     ResolutionBasis,
     Result,
     Route,
+    SearchTier,
+    TrackedNode,
     utcnow,
     weakest_basis,
 )
@@ -127,6 +129,11 @@ class Connector:
         self.warnings: list[str] = []
         self._expanded: set[str] = set()
         self._urls_seen: set[str] = set()
+        #: Breadth-first picture of the search, published as it fills.
+        self._tiers: list[SearchTier] = []
+        #: An unrecognised value runs bidirectional rather than failing a job
+        #: over a typo in an env var; run() logs which one is in force either way.
+        self._staged = (settings.search_strategy or "").strip().lower() == "staged"
         # Set once in run(); each side steers toward the other's notability.
         self._a_is_famous = True
         self._b_is_famous = True
@@ -201,6 +208,8 @@ class Connector:
         self.providers = ()
         self._expanded = set()
         self._urls_seen = set()
+        # The registry holds its own copies; these are the crawl's working set.
+        self._tiers = []
 
     # -- entry point --------------------------------------------------------
     async def run(self) -> Result:
@@ -208,9 +217,18 @@ class Connector:
             self.warnings.append(WARN_NO_REFERENT_RESOLUTION)
             self.log.warn("degraded", "no Anthropic key: strict same-sentence extraction only")
 
+        configured = (self.s.search_strategy or "").strip().lower()
+        if configured not in ("bidirectional", "staged"):
+            self.log.warn(
+                "strategy.unknown",
+                f"search_strategy={self.s.search_strategy!r} is not recognised; "
+                "running bidirectional",
+                configured=self.s.search_strategy,
+            )
         self.log(
             "job.started",
             f"{self.req.person_a} <-> {self.req.person_b}",
+            strategy="staged" if self._staged else "bidirectional",
             depth_a=self.depth_a,
             depth_b=self.depth_b,
             structured_providers=[p.name for p in self.providers],
@@ -250,7 +268,12 @@ class Connector:
 
         self._seed_a, self._seed_b = seed_a, seed_b
 
-        stopped = await self._search_loop(seed_a, seed_b)
+        # Both loops take (origin, target) and return "did a checkpoint stop
+        # us"; everything after this point is strategy-agnostic.
+        stopped = await (
+            self._staged_loop(seed_a, seed_b) if self._staged
+            else self._search_loop(seed_a, seed_b)
+        )
         # Enrichment is another minutes-long phase. Someone who has already
         # accepted a route is not waiting through it.
         if not stopped:
@@ -467,6 +490,294 @@ class Connector:
             level += 1
         return False
 
+    # -- staged search ------------------------------------------------------
+    async def _staged_loop(self, origin: str, target: str) -> bool:
+        """Bottom-up and one-directional: origin -> best 12 -> best 12 of each.
+
+        The bidirectional loop assumes both endpoints have a searchable network
+        for the two frontiers to meet in. When the target's side of the web is
+        thin, B's frontier stalls and A's depth budget is spent guessing which
+        branch to follow. This walks outward from the origin only, ranking hard
+        at every step, and then asks — once, over everyone it is holding —
+        which of them plausibly reach the target, instead of deciding that one
+        branch at a time on the way out.
+
+        Returns True if a checkpoint said stop, exactly like _search_loop.
+        """
+        cap = self.s.frontier_cap_per_level
+        per_parent = max(1, self.s.staged_keep_per_parent)
+        target_name = self.req.person_b
+
+        # Three expansions deep by construction (origin -> tier 1 -> pursuit).
+        # A shallower depth budget would build a graph whose far end no
+        # traversal in _checkpoint or _build_routes ever reaches, so the routes
+        # would exist in the store and never be found.
+        if self.depth_a < 3:
+            self.log("staged.depth_raised", f"depth_a {self.depth_a} -> 3 for the staged plan",
+                     was=self.depth_a)
+            self.depth_a = 3
+
+        parents_allowed, pursue_allowed = self._staged_budget(cap, self.s.staged_pursue_cap)
+
+        # -- tier 0: the origin, expanded completely ------------------------
+        tier0 = self._tier(0, "origin", parents=[self._display(origin)])
+        await self._expand([(origin, Endpoint.A)])
+        if self._stop_mid_level or await self._checkpoint():
+            self._close_tiers()
+            return True
+        surfaced = self._surfaced_by(origin, {origin, target})
+        ranked = await self._rank(
+            self._scored(surfaced), cap, toward_famous=self._b_is_famous,
+            target_node_id=target, target_name=target_name, where="the origin",
+        )
+        tier0.found, tier0.candidates = len(surfaced), self._tracked(ranked)
+        tier0.kept, tier0.status = len(tier0.candidates), "done"
+        self.log("tier.done", f"origin surfaced {tier0.found}, kept {tier0.kept}",
+                 level=0, found=tier0.found, kept=tier0.kept,
+                 top=[c.name for c in tier0.candidates[:3]])
+        self._publish_tiers()
+
+        # -- tier 1: each of those, expanded completely ---------------------
+        parents = tier0.candidates[:parents_allowed]
+        tier1 = self._tier(1, "tier 1", parents=[p.name for p in parents])
+        seen = {origin, target} | {c.node_id for c in tier0.candidates}
+        for parent in parents:
+            if self.ledger.out_of_time():
+                self.log.warn("budget", "wall clock exhausted mid tier 1",
+                              expanded=sum(1 for p in parents if p.expanded), of=len(parents))
+                break
+            await self._expand([(parent.node_id, Endpoint.A)])
+            parent.expanded = True
+            if self._stop_mid_level or await self._checkpoint():
+                self._close_tiers()
+                return True
+            children = self._surfaced_by(parent.node_id, seen)
+            kept = await self._rank(
+                self._scored(children), per_parent, toward_famous=self._b_is_famous,
+                target_node_id=target, target_name=target_name, where=parent.name,
+            )
+            seen |= {node_id for node_id, _ in kept}
+            # Renumbered across the tier rather than restarted per parent: rank
+            # 1 is the best candidate of the best parent, which is the order
+            # pursuit falls back on when reachability cannot separate them.
+            tier1.candidates += self._tracked(kept, start=len(tier1.candidates) + 1)
+            tier1.found += len(children)
+            tier1.kept = len(tier1.candidates)
+            self._publish_tiers()
+        self.log("tier.done", f"tier 1 surfaced {tier1.found}, kept {tier1.kept}",
+                 level=1, parents=len(parents), found=tier1.found, kept=tier1.kept)
+
+        # -- tier 2: which of them reach the target, and only those ---------
+        pursued = await self._pursuable(tier1.candidates, target, pursue_allowed)
+        tier1.status = "done"
+        tier2 = self._tier(2, "tier 2", parents=[p.name for p in pursued])
+        for candidate in pursued:
+            if self.ledger.out_of_time():
+                self.log.warn("budget", "wall clock exhausted mid tier 2",
+                              expanded=sum(1 for p in pursued if p.expanded), of=len(pursued))
+                break
+            await self._expand([(candidate.node_id, Endpoint.A)])
+            candidate.expanded = True
+            self._publish_tiers()
+            if self._stop_mid_level or await self._checkpoint():
+                self._close_tiers()
+                return True
+
+        reached: list[str] = []
+        for candidate in pursued:
+            reached += self._surfaced_by(candidate.node_id, seen | set(reached))
+        ranked = await self._rank(
+            self._scored(reached), cap, toward_famous=self._b_is_famous,
+            target_node_id=target, target_name=target_name, where="tier 2",
+        )
+        tier2.found, tier2.candidates = len(reached), self._tracked(ranked)
+        tier2.kept = len(tier2.candidates)
+        self.log("tier.done", f"tier 2 surfaced {tier2.found}, kept {tier2.kept}",
+                 level=2, parents=len(pursued), found=tier2.found, kept=tier2.kept)
+        self._close_tiers()
+        return False
+
+    async def _pursuable(
+        self, candidates: list[TrackedNode], target: str, limit: int
+    ) -> list[TrackedNode]:
+        """Ask which of the held candidates reach the target; return who to expand.
+
+        The verdicts are stamped on the candidates themselves, so the console
+        shows what was decided about all of them, not only the survivors.
+
+        "no" is the only answer that removes anyone, and only when some other
+        candidate scored better: an assessment that rejects everybody is far
+        more likely a bad batch than 144 true negatives, so it degrades to rank
+        order rather than ending the search.
+        """
+        if not candidates:
+            return []
+
+        target_attributes: dict[str, list[str]] = {}
+        node = self.store.get(target)
+        if node is not None:
+            target_attributes = {k: sorted(v) for k, v in node.attributes.items() if v}
+
+        facts = [f for f in (self._candidate_facts(c.node_id) for c in candidates) if f]
+        verdicts = await self.claude.assess_reachability(
+            facts, self.req.person_b, target_attributes
+        )
+        by_id = {c.node_id: c for c in candidates}
+        tally = {"yes": 0, "no": 0, "unknown": 0}
+        for node_id, answer, why in verdicts:
+            tracked = by_id.get(node_id)
+            if tracked is None:
+                continue
+            tracked.reaches_target = answer
+            tracked.reaches_target_why = why
+            tally[answer] = tally.get(answer, 0) + 1
+        self._publish_tiers()
+
+        self.log(
+            "reachability.assessed",
+            f"{tally['yes']} yes / {tally['no']} no / {tally['unknown']} unknown "
+            f"of {len(candidates)} toward {self.req.person_b}",
+            **tally, candidates=len(candidates),
+        )
+        if not tally["yes"] and not tally["no"]:
+            self.log.warn(
+                "reachability.degraded",
+                "no reachability judgement available; pursuing by rank",
+                candidates=len(candidates),
+            )
+
+        order = {"yes": 0, "unknown": 1, "no": 2}
+        ranked = sorted(
+            candidates, key=lambda c: (order.get(c.reaches_target or "unknown", 1), c.rank)
+        )
+        pursued = [c for c in ranked if c.reaches_target != "no"][:limit]
+        if not pursued:
+            self.log.warn(
+                "reachability.rejected_all",
+                f"every candidate was judged unable to reach {self.req.person_b}; "
+                "pursuing the top-ranked ones anyway",
+                candidates=len(candidates),
+            )
+            pursued = ranked[:limit]
+        self.log("tier.pursuing", f"{len(pursued)} of {len(candidates)} candidates",
+                 pursuing=[c.name for c in pursued[:5]])
+        return pursued
+
+    def _staged_budget(self, parents: int, pursue: int) -> tuple[int, int]:
+        """Trim the staged plan to what the ledger can still pay for.
+
+        One expansion costs `_expand_cost()` Serper credits and one of
+        max_nodes_expanded, and the plan is 1 origin + `parents` + `pursue` of
+        them. Measured against what is LEFT rather than the configured ceiling,
+        because seeding has already spent some of both.
+
+        Pursuit is trimmed first: an unexpanded tier-1 parent costs a whole
+        group of candidates that were never surfaced at all, where an unpursued
+        tier-2 candidate was at least surfaced, ranked and assessed. Never
+        silent — a short plan is logged with the arithmetic that produced it.
+        """
+        cost = self._expand_cost()
+        credits_left = max(0, self.ledger.max_serper_credits - self.ledger.serper_credits_used)
+        nodes_left = max(0, self.ledger.max_nodes_expanded - self.ledger.nodes_expanded)
+        affordable = min(credits_left // cost, nodes_left)
+        wanted = 1 + parents + pursue
+
+        if affordable >= wanted:
+            self.log(
+                "staged.plan",
+                f"{wanted} expansions at ~{cost} Serper credits each "
+                f"({wanted * cost} of {credits_left} remaining)",
+                parents=parents, pursue=pursue, credits=wanted * cost,
+                credits_left=credits_left, nodes_left=nodes_left,
+            )
+            return parents, pursue
+
+        spare = max(0, affordable - 1)  # the origin is expanded before anything else
+        got_parents = min(parents, spare)
+        got_pursue = min(pursue, spare - got_parents)
+        self.log.warn(
+            "staged.budget_shortfall",
+            f"plan wants {wanted} expansions (~{wanted * cost} Serper credits) but only "
+            f"{affordable} are affordable: {credits_left} credits and {nodes_left} node "
+            f"expansions remain at ~{cost} credits each — expanding {got_parents} of "
+            f"{parents} tier-1 parents and pursuing {got_pursue} of {pursue}",
+            wanted=wanted, affordable=affordable, cost_per_node=cost,
+            credits_left=credits_left, nodes_left=nodes_left,
+            parents=got_parents, parents_planned=parents,
+            pursue=got_pursue, pursue_planned=pursue,
+        )
+        return got_parents, got_pursue
+
+    def _expand_cost(self) -> int:
+        """Serper credits one expansion spends. Planning only; the ledger rules.
+
+        The shape of plan_queries on a non-seed node: COLLEAGUES always, plus at
+        most one angle template, then one search per bridge hypothesis. Credits
+        are charged per query, not per POST, so batching does not change it.
+        """
+        return 2 + max(0, self.s.bridge_hypotheses_per_node)
+
+    def _surfaced_by(self, node_id: str, exclude: set[str]) -> list[str]:
+        """Who this expansion left the node adjacent to, minus who we already hold.
+
+        Read back off the store rather than tracked during ingestion: edges
+        arrive out of order and identity merges rewrite ids underneath, so the
+        store is the only thing that knows who a node ended up next to.
+        """
+        anchor = self.store.resolve_id(node_id)
+        blocked = {self.store.resolve_id(n) for n in exclude} | {anchor}
+        out: list[str] = []
+        for neighbor, _edge in self.store.neighbors(anchor):
+            resolved = self.store.resolve_id(neighbor)
+            if resolved in blocked:
+                continue
+            blocked.add(resolved)
+            out.append(resolved)
+        return out
+
+    def _scored(self, node_ids: Sequence[str]) -> list[tuple[str, int]]:
+        """(id, distinct source URLs) — the input rank_frontier and _rank expect."""
+        return [
+            (node_id, len({o.url for o in node.observations}))
+            for node_id in node_ids
+            if (node := self.store.get(node_id)) is not None
+        ]
+
+    def _tracked(
+        self, ranked: Sequence[tuple[str, str]], *, start: int = 1
+    ) -> list[TrackedNode]:
+        out: list[TrackedNode] = []
+        for offset, (node_id, why) in enumerate(ranked):
+            node = self.store.get(node_id)
+            out.append(
+                TrackedNode(
+                    node_id=node_id,
+                    name=node.display_name if node else node_id,
+                    rank=start + offset,
+                    sources=len({o.url for o in node.observations}) if node else 0,
+                    why=why,
+                )
+            )
+        return out
+
+    def _tier(self, level: int, label: str, *, parents: list[str]) -> SearchTier:
+        tier = SearchTier(level=level, label=label, parents=parents)
+        self._tiers.append(tier)
+        # Published empty, on purpose: the console polls every 1.2s and a tier
+        # that only appears once it is full looks like nothing happening for the
+        # several minutes it takes to fill.
+        self._publish_tiers()
+        return tier
+
+    def _publish_tiers(self) -> None:
+        self.control.publish_tiers(self._tiers)
+
+    def _close_tiers(self) -> None:
+        """Mark every tier finished and publish, so nothing is left reading "running"."""
+        for tier in self._tiers:
+            tier.status = "done"
+        self._publish_tiers()
+
     async def _frontier(
         self,
         t: Traversal,
@@ -481,10 +792,43 @@ class Connector:
             for node_id, depth in t.dist.items()
             if depth == level and (node := self.store.get(node_id)) is not None
         ]
-        cap = self.s.frontier_cap_per_level
+        ranked = await self._rank(
+            scored,
+            self.s.frontier_cap_per_level,
+            toward_famous=toward_famous,
+            target_node_id=target_node_id,
+            target_name=target_name,
+            where=f"level {level}",
+        )
+        return [node_id for node_id, _ in ranked]
+
+    async def _rank(
+        self,
+        scored: list[tuple[str, int]],
+        cap: int,
+        *,
+        toward_famous: bool = True,
+        target_node_id: Optional[str] = None,
+        target_name: str = "",
+        where: str = "",
+    ) -> list[tuple[str, str]]:
+        """Best `cap` candidates toward the target, each with why it is there.
+
+        Shared by both strategies: the bidirectional loop ranks one BFS level,
+        the staged loop ranks what a single parent surfaced. Same call, same
+        cap, same degradation — a staged tier must not quietly rank by a
+        different rule than a level does.
+        """
         heuristic = self.policy.rank_frontier(scored, cap, toward_famous=toward_famous)
+        by_sources = dict(scored)
+
+        def unranked(node_ids: list[str]) -> list[tuple[str, str]]:
+            # No model judgement was applied, so do not attribute one: say what
+            # the recurrence heuristic actually ordered on.
+            return [(n, f"{by_sources.get(n, 0)} distinct sources") for n in node_ids]
+
         if not self.s.frontier_selection_enabled or len(scored) < 2:
-            return heuristic
+            return unranked(heuristic)
 
         # Rank BEFORE the cap, not after. The heuristic orders by how many
         # distinct sources mention someone, which is prominence — so ranking
@@ -496,7 +840,7 @@ class Connector:
         if len(scored) > len(pool):
             self.log(
                 "frontier.pool_capped",
-                f"ranking {len(pool)} of {len(scored)} candidates at level {level}",
+                f"ranking {len(pool)} of {len(scored)} candidates at {where}",
                 candidates=len(scored), ranked=len(pool),
             )
 
@@ -515,7 +859,15 @@ class Connector:
                 why or f"reordered {len(ordered)} candidates toward {target_name}",
                 target=target_name, top=[self._display(n) for n in ordered[:3]],
             )
-        return ordered[:cap] or heuristic
+        kept = ordered[:cap]
+        if not kept:
+            return unranked(heuristic)
+        # The model writes one sentence about its top pick, so only the top pick
+        # can honestly carry it.
+        return [
+            (n, why if i == 0 and why else f"ranked {i + 1} of {len(ordered)} toward {target_name}")
+            for i, n in enumerate(kept)
+        ]
 
     async def _bridge_queries(self, node: Node, target: str) -> list[Query]:
         """Ask who specifically might connect this node to the far endpoint.
