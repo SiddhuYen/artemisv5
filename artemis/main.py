@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from artemis.config import get_settings
+from artemis.graph.relations import RelationCache
 from artemis.jobs import InProcessJobRegistry
 from artemis.models import (
     ConnectAccepted,
@@ -93,16 +94,53 @@ async def console() -> Response:
 
 
 @app.get("/health")
-async def health() -> dict[str, object]:
+async def health(relations: bool = False) -> dict[str, object]:
+    """Liveness, plus enough to tell whether the cache disk is really in play.
+
+    `relations=true` adds the banked counts. Off by default and deliberately so:
+    the Dockerfile probes this every 30s with a 5s timeout, and the people count
+    is a UNION over the whole relations table — cheap at ten thousand rows, not
+    obviously cheap at a million. A health check that gets slower as the cache
+    grows would restart the container for the same reason it did before.
+    """
     s = app.state.settings
-    return {
+    # Whether the cache survives a restart is invisible from outside, and both
+    # ways of getting it wrong are quiet: point ARTEMIS_CACHE_DIR at no disk and
+    # every run is cold forever, or mount one the container cannot write to and
+    # DiskCache._write swallows the OSError and caches nothing. Report the path,
+    # whether it is actually writable, and how much is banked in it.
+    cache_dir = Path(s.cache_dir)
+    probe = cache_dir / ".write-probe"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        writable = True
+        cache_error = None
+    except OSError as exc:
+        writable = False
+        cache_error = f"{type(exc).__name__}: {exc}"
+
+    payload: dict[str, object] = {
         "ok": True,
         "serper_configured": bool(s.serper_api_key),
         "claude_configured": s.claude_enabled,
         "extraction_model": s.extraction_model,
         "verification_model": s.verification_model,
         "degraded": not s.claude_enabled,
+        "cache_dir": str(cache_dir),
+        "cache_writable": writable,
+        "cache_error": cache_error,
     }
+    if relations:
+        counts = await RelationCache(
+            cache_dir,
+            enabled=s.relation_cache_enabled and writable,
+            ttl_s=s.relation_cache_ttl_s,
+        ).stats()
+        payload["relations_cached"] = counts["relations"]
+        payload["people_cached"] = counts["people"]
+    return payload
 
 
 # ---------------------------------------------------------------------------
