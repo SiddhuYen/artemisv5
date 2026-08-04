@@ -510,6 +510,65 @@ class ClaudeClient:
         ordered += [i for i in ids if i not in seen]
         return ordered, str(data.get("why", ""))[:300]
 
+    async def propose_target_links(
+        self,
+        candidates: Sequence[dict[str, Any]],
+        target: str,
+        target_context: str,
+        limit: int,
+        batch_size: int = 40,
+    ) -> list[tuple[str, str, str]]:
+        """[(candidate_id, connection, query)] — how the target might reach them.
+
+        The reverse of propose_bridges: that one stands on a node and guesses
+        outward, this one stands on the target — whose own network was never
+        crawled — and guesses inward across everyone the origin side reached.
+        Nothing here is a claim; each query only decides which pages get read.
+        """
+        ids = {str(c.get("id")) for c in candidates if c.get("id")}
+        if not ids or limit <= 0:
+            return []
+        if not self.enabled or not self.s.strategy_enabled:
+            return []
+
+        out: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        items = list(candidates)
+        for start in range(0, len(items), max(1, batch_size)):
+            if len(out) >= limit:
+                break
+            chunk = items[start : start + max(1, batch_size)]
+            payload = json.dumps(
+                {"target": target, "target_description": target_context,
+                 "people": chunk},
+                ensure_ascii=False, sort_keys=True, indent=2,
+            )
+            data = await self._call_json(
+                model=self.s.strategy_model,
+                system=prompts.TARGET_LINKS_SYSTEM_PROMPT,
+                user=payload,
+                schema=prompts.TARGET_LINKS_JSON_SCHEMA,
+                max_tokens=4000,
+                cache_key=f"tlinks|{prompts.PROMPT_VERSION}|{self.s.strategy_model}|"
+                          f"{content_hash(payload)}",
+            )
+            if not data:
+                continue
+            for item in data.get("links") or []:
+                if not isinstance(item, dict):
+                    continue
+                cid = str(item.get("id", "")).strip()
+                query = str(item.get("query", "")).strip()
+                # An id the model invented points at nobody in the graph, so a
+                # page found for it could never attach to a route.
+                if cid not in ids or cid in seen or not query:
+                    continue
+                seen.add(cid)
+                out.append((cid, str(item.get("connection", ""))[:300], query))
+                if len(out) >= limit:
+                    break
+        return out
+
     async def assess_reachability(
         self,
         candidates: Sequence[dict[str, Any]],

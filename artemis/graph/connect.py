@@ -160,14 +160,15 @@ class Connector:
         does it build routes, and pivot verdicts for an unchanged pivot come
         back from the Claude disk cache rather than the model.
         """
-        if self._seed_a is None or self._seed_b is None:
+        target = self._target_node()
+        if self._seed_a is None or target is None:
             return False
         ta = traverse(self.store, self._seed_a, self.depth_a + 2)
-        tb = traverse(self.store, self._seed_b, self.depth_b + 2)
+        tb = traverse(self.store, target, self.depth_b + 2)
         if not (set(ta.dist) & set(tb.dist)):
             return self.control.should_stop()
 
-        routes = await self._build_routes(self._seed_a, self._seed_b)
+        routes = await self._build_routes(self._seed_a, target)
         if routes:
             # Republishing an unchanged set would restart the console's prompt
             # under the operator every few seconds.
@@ -234,6 +235,20 @@ class Connector:
             structured_providers=[p.name for p in self.providers],
         )
 
+        if self._staged:
+            # The tracker has nothing to show until tier 0 opens, and seeding is
+            # not quick, so say what is happening rather than render an empty
+            # box for minutes.
+            self._tiers = [
+                SearchTier(
+                    level=-1,
+                    label="seeding the origin",
+                    parents=[self.req.person_a],
+                    status="running",
+                )
+            ]
+            self._publish_tiers()
+
         fame_a, why_a = await self.claude.classify_fame(
             self.req.person_a, self.req.context_a or ""
         )
@@ -255,13 +270,33 @@ class Connector:
         )
         if disambiguation:
             return self._result(found=False, disambiguation=disambiguation)
-        seed_b, disambiguation = await self._seed(
-            self.req.person_b, self.req.context_b, Endpoint.B, self.req.person_a
-        )
-        if disambiguation:
-            return self._result(found=False, disambiguation=disambiguation)
+        # Staged never expands the target — it walks out from the origin and
+        # asks who reaches him. Crawling him anyway cost 203 seconds and 685
+        # merge decisions off 7 pages before a single node was expanded, and
+        # bought nothing: the whole graph it built was on the side the strategy
+        # does not traverse. The context box is the target description the
+        # ranker and the reachability pass actually read.
+        #
+        # He still becomes a node — the moment the origin side grounds an edge
+        # naming him, the resolver creates him like anyone else. _target_node()
+        # looks for that, so routes form exactly as before, just without paying
+        # to build his network first.
+        seed_b: Optional[str] = None
+        if self._staged:
+            self.log(
+                "staged.target_not_seeded",
+                f"{self.req.person_b} will not be crawled; "
+                f"context: {self.req.context_b or '(none given)'}",
+                target=self.req.person_b, context=self.req.context_b or "",
+            )
+        else:
+            seed_b, disambiguation = await self._seed(
+                self.req.person_b, self.req.context_b, Endpoint.B, self.req.person_a
+            )
+            if disambiguation:
+                return self._result(found=False, disambiguation=disambiguation)
 
-        if seed_a is None or seed_b is None:
+        if seed_a is None or (seed_b is None and not self._staged):
             missing = self.req.person_a if seed_a is None else self.req.person_b
             self.warnings.append(f"no grounded mention of {missing!r} was found on any fetched page")
             return self._result(found=False)
@@ -278,7 +313,12 @@ class Connector:
         # accepted a route is not waiting through it.
         if not stopped:
             await self._enrich_with_providers(seed_a, seed_b)
-        routes = await self._build_routes(seed_a, seed_b)
+        # Staged never seeded him, so resolve him now: he is in the graph only
+        # if the origin side actually reached him.
+        final_target = self._target_node() or seed_b
+        routes = (
+            await self._build_routes(seed_a, final_target) if final_target else []
+        )
         if stopped:
             self.log("run.stopped_early", f"finishing with {len(routes)} route(s)",
                      routes=len(routes))
@@ -591,11 +631,90 @@ class Connector:
             target_node_id=target, target_name=target_name, where="tier 2",
         )
         tier2.found, tier2.candidates = len(reached), self._tracked(ranked)
-        tier2.kept = len(tier2.candidates)
+        tier2.kept, tier2.status = len(tier2.candidates), "done"
         self.log("tier.done", f"tier 2 surfaced {tier2.found}, kept {tier2.kept}",
                  level=2, parents=len(pursued), found=tier2.found, kept=tier2.kept)
+        self._publish_tiers()
+
+        # -- tier 3: the target's side, finally ------------------------------
+        if await self._probe_target_links(tier1.candidates + tier2.candidates):
+            self._close_tiers()
+            return True
         self._close_tiers()
         return False
+
+    async def _probe_target_links(self, pool: list[TrackedNode]) -> bool:
+        """Ask where the target might attach to anyone we hold, then check.
+
+        The only point at which the target's own side is touched, and it is a
+        guess-then-verify rather than a crawl: his network is never expanded,
+        so the cost is one search per plausible tie instead of the hundreds of
+        pages that seeding a famous person costs. Grounding is unchanged — a
+        proposed tie becomes a hop only if a fetched page states it.
+
+        Returns True if a checkpoint said stop.
+        """
+        limit = max(0, int(getattr(self.s, "target_link_probes", 0) or 0))
+        if not pool or limit <= 0:
+            return False
+
+        tier3 = self._tier(3, "target links", parents=[self.req.person_b])
+        facts = [f for f in (self._candidate_facts(c.node_id) for c in pool) if f]
+        links = await self.claude.propose_target_links(
+            facts,
+            self.req.person_b,
+            (self.req.context_b or "").strip(),
+            limit,
+            batch_size=max(1, self.s.reachability_batch_size),
+        )
+        if not links:
+            self.log.warn("target_links.none",
+                          f"no plausible tie proposed between {self.req.person_b} "
+                          f"and any of the {len(facts)} people held")
+            tier3.status = "done"
+            self._publish_tiers()
+            return False
+
+        by_id = {c.node_id: c for c in pool}
+        queries: list[Query] = []
+        tracked: list[TrackedNode] = []
+        for node_id, connection, raw in links:
+            rendered = sanitise_hypothesis(raw)
+            candidate = by_id.get(node_id)
+            if not rendered or candidate is None:
+                continue
+            marked = candidate.model_copy(update={
+                "rank": len(tracked) + 1,
+                "reaches_target": "possible",
+                "reaches_target_why": connection,
+            })
+            tracked.append(marked)
+            self.log("target_link.proposed",
+                     f"{self.req.person_b} <- {candidate.name}: {connection}",
+                     candidate=candidate.name, query=rendered)
+            queries.append(
+                Query(
+                    template=QueryTemplate.HYPOTHESIS,
+                    rendered=rendered,
+                    subject_name=candidate.name,
+                    node_id=node_id,
+                )
+            )
+
+        tier3.candidates, tier3.found, tier3.kept = tracked, len(links), len(tracked)
+        self._publish_tiers()
+        if not queries:
+            tier3.status = "done"
+            self._publish_tiers()
+            return False
+
+        self.log("target_links.verifying", f"{len(queries)} tie(s) to check by search",
+                 queries=len(queries))
+        results = await self.provider.search(queries)
+        await self._ingest(self._urls_from(results))
+        tier3.status = "done"
+        self._publish_tiers()
+        return self._stop_mid_level or await self._checkpoint()
 
     async def _pursuable(
         self, candidates: list[TrackedNode], target: str, limit: int
@@ -613,10 +732,7 @@ class Connector:
         if not candidates:
             return []
 
-        target_attributes: dict[str, list[str]] = {}
-        node = self.store.get(target)
-        if node is not None:
-            target_attributes = {k: sorted(v) for k, v in node.attributes.items() if v}
+        target_attributes = self._target_facts()
 
         facts = [f for f in (self._candidate_facts(c.node_id) for c in candidates) if f]
         verdicts = await self.claude.assess_reachability(
@@ -769,6 +885,39 @@ class Connector:
         self._publish_tiers()
         return tier
 
+    def _target_node(self) -> Optional[str]:
+        """The target's node, once the origin side has grounded a mention of him.
+
+        Staged never seeds him, so he exists only from the moment somebody's
+        page says something about him — which is also the only moment a route
+        through him becomes possible.
+        """
+        if self._seed_b is not None:
+            return self._seed_b
+        for node in self.store.nodes.values():
+            if could_be_same_name(self.req.person_b, node.display_name) or any(
+                could_be_same_name(self.req.person_b, v) for v in node.name_variants
+            ):
+                self._seed_b = node.node_id
+                self.log("staged.target_reached", f"{node.display_name} is now in the graph",
+                         node_id=node.node_id)
+                return self._seed_b
+        return None
+
+    def _target_facts(self) -> dict[str, list[str]]:
+        """What the ranker is steering toward.
+
+        Grounded attributes when the target is in the graph; otherwise the
+        caller's context box. That fallback is the whole point of not crawling
+        him: a line like "US President" is enough to point candidates in the
+        right direction, and it costs nothing to obtain.
+        """
+        node_id = self._target_node()
+        if node_id and (node := self.store.get(node_id)) is not None and node.attributes:
+            return {k: sorted(v) for k, v in node.attributes.items() if v}
+        context = (self.req.context_b or "").strip()
+        return {"description": [context]} if context else {}
+
     def _publish_tiers(self) -> None:
         self.control.publish_tiers(self._tiers)
 
@@ -848,6 +997,8 @@ class Connector:
         target_attributes: dict[str, list[str]] = {}
         if target_node_id and (node := self.store.get(target_node_id)) is not None:
             target_attributes = {k: sorted(v) for k, v in node.attributes.items() if v}
+        if not target_attributes and target_name == self.req.person_b:
+            target_attributes = self._target_facts()
             target_name = target_name or node.display_name
 
         ordered, why = await self.claude.choose_frontier(

@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     #: one answer the model has to keep 144 ids straight in; batching also means
     #: a single failed call costs 40 verdicts, not all of them.
     reachability_batch_size: int = 40
+    #: staged tier 3: how many proposed target-ties get verified by search.
+    #: The only point the target's side is touched at all, and it is one search
+    #: per tie rather than a crawl — seeding a famous endpoint cost 203s and 685
+    #: merge decisions off 7 pages, on the side the strategy never traverses.
+    #: 0 disables the probe and the run ends at tier 2.
+    target_link_probes: int = 24
     #: Ceiling on those calls per job, so a tier that fans out past the plan
     #: cannot turn into an unbounded number of them. Candidates past the last
     #: call are reported "unknown" and still pursued by rank.
