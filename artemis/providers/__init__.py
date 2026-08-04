@@ -33,12 +33,52 @@ class Discovery:
     why: str
 
 
+@dataclass(frozen=True)
+class Assertion:
+    """A relationship a curated record states outright, with no page to read.
+
+    The exception to this package's URL-only rule, and only for sources that
+    genuinely assert rather than co-list. A Wikidata claim or a registry
+    officership is written by an editor or filed by a company; it is not a
+    sentence we invented to feed the extractor, which is what the docstring
+    above rejects.
+
+    Two things make these worth admitting despite carrying no span. They are
+    curated and cited at the source. And they arrive with a canonical entity id
+    — a QID, a company number — where every other path through this system has
+    only a name, so on identity they are stronger than anything the extractor
+    can produce. They are labelled STRUCTURED_CLAIM throughout, and a route
+    resting on one ranks below an equal-length route built from prose.
+    """
+
+    subject: str
+    object: str
+    #: Rendered as the hop's statement, e.g. "founded" or "is an officer of".
+    relation: str
+    #: The record itself — a Wikidata entity page, a registry filing.
+    source_url: str
+    source_title: str
+    provider: str
+    #: Canonical ids where the provider has them. These make the identity claim
+    #: checkable rather than name-based.
+    subject_id: str = ""
+    object_id: str = ""
+
+
 class StructuredProvider(Protocol):
     name: str
 
     def available(self) -> bool: ...
 
     async def discover(self, *, person: str, orgs: Sequence[str]) -> list[Discovery]: ...
+
+
+class AssertingProvider(StructuredProvider, Protocol):
+    """A provider whose records assert relationships, not merely locate them."""
+
+    async def assert_relations(
+        self, *, person: str, orgs: Sequence[str]
+    ) -> list[Assertion]: ...
 
 
 from artemis.providers.edgar import EdgarProvider  # noqa: E402
@@ -65,8 +105,11 @@ def build_providers(settings) -> list[StructuredProvider]:  # type: ignore[no-un
 
 
 __all__ = [
+    "Assertion",
+    "AssertingProvider",
     "Discovery",
     "StructuredProvider",
+    "WikidataProvider",
     "RosterProvider",
     "EdgarProvider",
     "OpenAlexProvider",

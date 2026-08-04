@@ -72,10 +72,22 @@ class ResolutionBasis(str, Enum):
     #: what they share. Always labelled distinctly in output — co-membership is
     #: a fact about a page, not a claim that these two people know each other.
     CO_LISTING = "co_listing"
+    #: Not extracted from a page at all. A structured provider asserted the
+    #: relationship directly — a Wikidata claim, a company-registry officership.
+    #: These are curated and cited at the source, and they carry a canonical
+    #: entity id rather than a name, so on identity they are stronger than
+    #: anything the extractor can offer. What they lack is prose: nobody wrote a
+    #: sentence saying it. So `span_text` holds the rendered claim rather than
+    #: page text, and a route that leans on one is labelled and ranked below an
+    #: equal-length route whose every hop came from someone's writing.
+    STRUCTURED_CLAIM = "structured_claim"
 
 
 #: Hops whose evidence is co-membership rather than a stated relationship.
 CO_MEMBERSHIP_BASES = frozenset({ResolutionBasis.CO_LISTING})
+
+#: Hops asserted by a provider rather than read off a page.
+CLAIM_BASES = frozenset({ResolutionBasis.STRUCTURED_CLAIM})
 
 
 class IdentityBasis(str, Enum):
@@ -300,7 +312,13 @@ class Extraction(BaseModel):
                 "span offsets do not match span_text length "
                 f"({self.span_end - self.span_start} != {len(self.span_text)})"
             )
-        if self.resolution_basis is not ResolutionBasis.DIRECT and not self.context_before.strip():
+        # A structured claim has no antecedent to carry: there is no surrounding
+        # prose, because there is no prose. Its span is the rendered claim and
+        # its provenance is the entity record named in source_url.
+        if (
+            self.resolution_basis not in (ResolutionBasis.DIRECT, ResolutionBasis.STRUCTURED_CLAIM)
+            and not self.context_before.strip()
+        ):
             raise ValueError(
                 f"resolution_basis={self.resolution_basis.value} requires a non-empty "
                 "context_before containing the antecedent"
@@ -642,4 +660,8 @@ WARN_NAME_ONLY_PIVOT = "route contains a name_only pivot: hops are individually 
 WARN_CO_LISTING_HOP = (
     "route contains a co_listing hop: the source lists both people under one "
     "affiliation but does not state that they know each other"
+)
+WARN_STRUCTURED_CLAIM_HOP = (
+    "route contains a structured_claim hop: a provider's curated record asserts "
+    "this relationship, but no page was found stating it in prose"
 )

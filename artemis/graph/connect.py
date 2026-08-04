@@ -32,18 +32,22 @@ from artemis.identity.resolve import (
 )
 from artemis.providers import build_providers
 from artemis.models import (
+    CLAIM_BASES,
     CO_MEMBERSHIP_BASES,
     WARN_CO_LISTING_HOP,
     WARN_NAME_ONLY_PIVOT,
     WARN_NO_REFERENT_RESOLUTION,
+    WARN_STRUCTURED_CLAIM_HOP,
     ConnectRequest,
     DisambiguationCandidate,
     Endpoint,
+    Extraction,
     Hop,
     HopEndpoint,
     IdentityBasis,
     Node,
     Observation,
+    ResolutionBasis,
     Result,
     Route,
     utcnow,
@@ -563,8 +567,100 @@ class Connector:
                 continue
             urls += batch
 
+        claimed = await self._ingest_assertions(targets, sem)
         await self._ingest(urls)
-        self.log("providers.finished", f"{len(urls)} documents discovered")
+        self.log("providers.finished",
+                 f"{len(urls)} documents discovered, {claimed} claims admitted",
+                 documents=len(urls), claims=claimed)
+
+    async def _ingest_assertions(
+        self, targets: list[tuple[str, list[str]]], sem: asyncio.Semaphore
+    ) -> int:
+        """Admit relationships providers state outright, with no page to read.
+
+        Runs before _ingest, not instead of it: the discovered documents are
+        still fetched, and a hop grounded in someone's prose outranks one
+        grounded in a record. This is what keeps a relationship that no page
+        happens to phrase extractably — which is most registry filings, and many
+        Wikidata claims — from being lost entirely.
+        """
+        asserting = [p for p in self.providers if hasattr(p, "assert_relations")]
+        if not asserting:
+            return 0
+
+        async def ask(provider, person: str, orgs: list[str]):  # type: ignore[no-untyped-def]
+            async with sem:
+                return await provider.assert_relations(person=person, orgs=orgs)
+
+        results = await asyncio.gather(
+            *(
+                ask(provider, person, orgs)
+                for provider in asserting
+                for person, orgs in targets
+            ),
+            return_exceptions=True,
+        )
+
+        admitted = 0
+        for batch in results:
+            if isinstance(batch, BaseException):
+                self.log.warn("claim.error", f"{type(batch).__name__}: {batch}")
+                continue
+            for assertion in batch:
+                if await self._admit_claim(assertion):
+                    admitted += 1
+        return admitted
+
+    async def _admit_claim(self, assertion: Any) -> bool:
+        extraction = _claim_extraction(assertion)
+        if extraction is None:
+            return False
+        # An island is an island however well attested. A claim between two
+        # strangers still cannot contribute a route, and admitting it would
+        # undo the guard that keeps 67-of-83 discovered people out of the graph.
+        if not self._connects_to_graph(extraction, assertion.subject):
+            return False
+
+        observation_url = assertion.source_url
+        subject = await self.resolver.resolve(
+            extraction.subject_name,
+            Observation(
+                url=observation_url, page_title=assertion.source_title,
+                span_text=extraction.span_text, span_start=extraction.span_start,
+                span_end=extraction.span_end, retrieved_at=utcnow(),
+                attributes=bucket_attributes([]),
+            ),
+            # The provider's canonical id is a stronger identity statement than
+            # any name match: it is the entity, not a string that looks like it.
+            canonical_urls={observation_url} if assertion.subject_id else set(),
+            page_url=observation_url,
+            provenance_name=assertion.subject,
+        )
+        obj = await self.resolver.resolve(
+            extraction.object_name,
+            Observation(
+                url=observation_url, page_title=assertion.source_title,
+                span_text=extraction.span_text, span_start=extraction.span_start,
+                span_end=extraction.span_end, retrieved_at=utcnow(),
+                attributes=bucket_attributes([]),
+            ),
+            page_url=observation_url,
+            provenance_name=assertion.object,
+        )
+        edge = self.store.add_edge(
+            subject.node_id, obj.node_id, extraction,
+            source_url=observation_url,
+            source_title=assertion.source_title,
+            retrieved_at=utcnow(),
+        )
+        if edge is None:
+            return False
+        self.log(
+            "claim.admitted",
+            f"{assertion.subject} {assertion.relation} {assertion.object}",
+            provider=assertion.provider, source=observation_url,
+        )
+        return True
 
     async def _replay_cached(self, person: str) -> int:
         """Re-enter previously grounded relations for this person, free.
@@ -833,7 +929,17 @@ class Connector:
             if route is not None:
                 routes.append(route)
 
-        routes.sort(key=lambda r: (r.length, -_basis_rank(r.weakest_identity_basis)))
+        # Length first, then prose over records: at equal length a route whose
+        # every hop is somebody's writing outranks one leaning on a provider's
+        # claim, however well attested that claim is. Identity strength breaks
+        # the remaining ties, as before.
+        routes.sort(
+            key=lambda r: (
+                r.length,
+                _claim_hops(r),
+                -_basis_rank(r.weakest_identity_basis),
+            )
+        )
         return routes[: self.s.max_routes_returned]
 
     def _reconstruct(
@@ -904,6 +1010,12 @@ class Connector:
             for v in verdicts.values()
             if v.basis is IdentityBasis.NAME_ONLY
         ]
+        for edge in edges:
+            if edge.extraction.resolution_basis in CLAIM_BASES:
+                warnings.append(
+                    f"{WARN_STRUCTURED_CLAIM_HOP} — {edge.extraction.resolved_statement} "
+                    f"({edge.source_url})"
+                )
         co_listed = [e for e in edges if e.extraction.resolution_basis in CO_MEMBERSHIP_BASES]
         for edge in co_listed:
             warnings.append(
@@ -979,6 +1091,38 @@ def _parse_iso(value: str) -> "datetime":
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return utcnow()
+
+
+def _claim_hops(route: Route) -> int:
+    return sum(1 for hop in route.hops if hop.resolution_basis in CLAIM_BASES)
+
+
+def _claim_extraction(assertion: Any) -> Optional[Extraction]:
+    """Render an assertion as an Extraction whose span is the claim itself.
+
+    The span is not page text and is not pretending to be: STRUCTURED_CLAIM says
+    so at every layer that reads it. It exists because the whole pipeline below
+    this point — grounding, merging, route building — is built on Extraction, and
+    a claim that cannot travel through it cannot become a hop.
+    """
+    subject = (getattr(assertion, "subject", "") or "").strip()
+    obj = (getattr(assertion, "object", "") or "").strip()
+    relation = (getattr(assertion, "relation", "") or "").strip()
+    if not subject or not obj or subject.casefold() == obj.casefold():
+        return None
+    statement = f"{subject} {relation} {obj}".strip()
+    try:
+        return Extraction(
+            subject_name=subject,
+            object_name=obj,
+            span_text=statement,
+            span_start=0,
+            span_end=len(statement),
+            resolved_statement=statement,
+            resolution_basis=ResolutionBasis.STRUCTURED_CLAIM,
+        )
+    except Exception:
+        return None
 
 
 def _basis_rank(basis: IdentityBasis) -> int:

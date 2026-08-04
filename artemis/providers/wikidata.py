@@ -6,12 +6,17 @@ those claims straight into edges by writing a sentence for each one; this does
 not, for the reason in this package's docstring — a sentence we wrote ourselves
 is not a page asserting a relationship.
 
-What survives the translation is the *pointing*. If Wikidata says this person
-co-founded that company, married that person, or chairs that board, then those
-entities have Wikipedia articles, and those articles are prose written by
-someone else that states the relationship in their own words. So a claim here
-buys a URL, and the ordinary fetch -> extract -> ground path does the rest. The
-claim itself never becomes evidence.
+This provider does both jobs. `discover()` follows the pointing: if Wikidata
+says this person co-founded that company or married that person, those entities
+have articles, and those articles are prose written by someone else stating the
+relationship in their own words — so a claim buys a URL and the ordinary fetch
+-> extract -> ground path does the rest. That remains the preferred evidence.
+
+`assert_relations()` admits the claim itself when no such page turns up. Not the
+same as v2's synthesized sentence: nothing is invented here, the claim is a
+curated and cited record, and it arrives with QIDs for both ends where the rest
+of this system has only names. Those hops are labelled STRUCTURED_CLAIM and a
+route resting on one ranks below an equal-length route built from prose.
 
 Two guards carried over from v2 unchanged, each earned:
 
@@ -30,10 +35,11 @@ from typing import Any, Sequence
 
 import httpx
 
-from artemis.providers import Discovery
+from artemis.providers import Assertion, Discovery
 
 _API = "https://www.wikidata.org/w/api.php"
 _WIKIPEDIA = "https://en.wikipedia.org/wiki/{title}"
+_ENTITY = "https://www.wikidata.org/wiki/{qid}"
 
 #: Wikidata property -> how the target relates to the subject. Phrased for the
 #: job log, so an operator can see why a URL was fetched.
@@ -140,6 +146,92 @@ class WikidataProvider:
                     url=_WIKIPEDIA.format(title=title),
                     provider=self.name,
                     why=f"{person} — {relation} — {label or title}",
+                )
+            )
+        return out
+
+    async def assert_relations(
+        self, *, person: str, orgs: Sequence[str]
+    ) -> list[Assertion]:
+        """The same claims discover() follows, admitted as relationships.
+
+        A claim states the relationship outright and carries QIDs for both ends,
+        so it does not need a page to corroborate it. discover() still runs: the
+        article is worth reading anyway, and a hop grounded in prose outranks one
+        grounded here.
+        """
+        headers = {"User-Agent": self.s.user_agent}
+        async with httpx.AsyncClient(
+            timeout=20.0, headers=headers, follow_redirects=True
+        ) as client:
+            qid = await self._resolve_person(client, person, orgs)
+            if qid is None:
+                return []
+            entity = await self._entity(client, qid)
+            if entity is None:
+                return []
+            subject = _label(entity) or person
+
+            targets = _targets(entity)
+            await asyncio.sleep(0.1)
+            labels = await self._labels(client, [q for q, _ in targets])
+            out = [
+                Assertion(
+                    subject=subject,
+                    object=label,
+                    relation=relation,
+                    source_url=_ENTITY.format(qid=qid),
+                    source_title=f"Wikidata: {subject} ({qid})",
+                    provider=self.name,
+                    subject_id=qid,
+                    object_id=target_qid,
+                )
+                for target_qid, relation in targets
+                for _title, label in [labels.get(target_qid, ("", ""))]
+                if label and label.casefold() != subject.casefold()
+            ]
+
+            await asyncio.sleep(0.1)
+            out.extend(await self._reverse_claims(client, qid, subject))
+        return out
+
+    async def _reverse_claims(
+        self, client: httpx.AsyncClient, qid: str, subject: str
+    ) -> list[Assertion]:
+        try:
+            resp = await client.get(
+                _SPARQL,
+                params={"query": _REVERSE_QUERY % qid, "format": "json"},
+                headers={"Accept": "application/sparql-results+json"},
+            )
+            if resp.status_code != 200:
+                return []
+            rows = (resp.json().get("results") or {}).get("bindings", []) or []
+        except Exception:
+            return []
+
+        out: list[Assertion] = []
+        seen: set[str] = set()
+        for row in rows:
+            org_uri = ((row.get("org") or {}).get("value") or "").strip()
+            org_qid = org_uri.rsplit("/", 1)[-1] if org_uri else ""
+            label = ((row.get("orgLabel") or {}).get("value") or "").strip()
+            if _QID_ONLY.match(label):
+                article = ((row.get("article") or {}).get("value") or "").strip()
+                label = article.rsplit("/", 1)[-1].replace("_", " ") if article else ""
+            if not label or label in seen or label.casefold() == subject.casefold():
+                continue
+            seen.add(label)
+            out.append(
+                Assertion(
+                    subject=subject,
+                    object=label,
+                    relation=((row.get("rel") or {}).get("value") or "is involved with").strip(),
+                    source_url=_ENTITY.format(qid=org_qid or qid),
+                    source_title=f"Wikidata: {label} ({org_qid})",
+                    provider=self.name,
+                    subject_id=qid,
+                    object_id=org_qid,
                 )
             )
         return out
@@ -291,6 +383,10 @@ def _is_human(entity: dict) -> bool:
         if _claim_qid(claim) == _HUMAN:
             return True
     return False
+
+
+def _label(entity: dict) -> str:
+    return str(((entity.get("labels") or {}).get("en") or {}).get("value", ""))
 
 
 def _sitelink(entity: dict) -> str:

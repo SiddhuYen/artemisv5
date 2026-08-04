@@ -5,9 +5,13 @@ throttled to the point of uselessness). Absent token => provider reports itself
 unavailable and the crawl proceeds without it.
 
 Returns links to company pages whose officer lists name people alongside the
-subject. As with the other structured providers, the page is fetched and
-extracted normally — co-officership is not itself treated as a stated
-relationship.
+subject; the page is fetched and extracted normally, so co-officership grounds
+as a co-listing rather than a stated relationship.
+
+assert_relations() additionally admits the officership itself. A registry entry
+is filed under statute and carries a jurisdiction and company number, so it is
+curated and canonically identified in the way STRUCTURED_CLAIM requires — and
+registry pages rarely contain prose for the extractor to ground.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from typing import Any, Sequence
 
 import httpx
 
-from artemis.providers import Discovery
+from artemis.providers import Assertion, Discovery
 
 _BASE = "https://api.opencorporates.com/v0.4"
 _COMPANY_PAGE = "https://opencorporates.com/companies/{jurisdiction}/{number}"
@@ -53,6 +57,41 @@ class OpenCorporatesProvider:
                         url=url,
                         provider=self.name,
                         why=f"{person} listed as an officer of {company}",
+                    )
+                )
+        return out
+
+    async def assert_relations(
+        self, *, person: str, orgs: Sequence[str]
+    ) -> list[Assertion]:
+        """Officerships as stated relationships, not merely pages to read.
+
+        A registry entry is filed by the company under statute and carries a
+        jurisdiction and company number — a canonical id, the same reason a
+        Wikidata QID is admissible here. The company page is still fetched by
+        discover(); this only matters when that page yields no extractable prose,
+        which for a registry listing is most of the time.
+        """
+        out: list[Assertion] = []
+        seen: set[str] = set()
+        async with httpx.AsyncClient(
+            timeout=20.0, headers={"User-Agent": self.s.user_agent}
+        ) as client:
+            for jurisdiction, number, company in await self._companies(client, person):
+                if not company or company in seen:
+                    continue
+                seen.add(company)
+                out.append(
+                    Assertion(
+                        subject=person,
+                        object=company,
+                        relation="is a registered officer of",
+                        source_url=_COMPANY_PAGE.format(
+                            jurisdiction=jurisdiction, number=number
+                        ),
+                        source_title=f"OpenCorporates: {company} ({jurisdiction}/{number})",
+                        provider=self.name,
+                        object_id=f"{jurisdiction}/{number}",
                     )
                 )
         return out
