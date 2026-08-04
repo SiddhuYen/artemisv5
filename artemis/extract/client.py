@@ -399,6 +399,62 @@ class ClaudeClient:
             angle = "generic"
         return angle, str(data.get("why", ""))[:300]
 
+    async def propose_bridges(
+        self,
+        subject: str,
+        subject_attributes: dict[str, list[str]],
+        target: str,
+        target_attributes: dict[str, list[str]],
+        limit: int,
+    ) -> list[tuple[str, str, str]]:
+        """[(bridge_name, why, query)] — who might connect these two, and how to check.
+
+        The one place a model writes text that leaves this system. It is bounded
+        rather than trusted: the caller sanitises every query, and nothing here
+        can become a relationship — a page still has to state it.
+        """
+        if not self.enabled or not self.s.strategy_enabled or limit <= 0:
+            return []
+        if not any(subject_attributes.values()) and not any(target_attributes.values()):
+            # Nothing grounded on either end. Anything proposed here would be
+            # recall of who these names are, not reasoning about the graph.
+            return []
+
+        payload = json.dumps(
+            {
+                "subject": subject, "subject_attributes": subject_attributes,
+                "target": target, "target_attributes": target_attributes,
+                "max_bridges": limit,
+            },
+            ensure_ascii=False, sort_keys=True, indent=2,
+        )
+        data = await self._call_json(
+            model=self.s.strategy_model,
+            system=prompts.BRIDGES_SYSTEM_PROMPT,
+            user=payload,
+            schema=prompts.BRIDGES_JSON_SCHEMA,
+            max_tokens=2000,
+            cache_key=f"bridges|{prompts.PROMPT_VERSION}|{self.s.strategy_model}|"
+                      f"{content_hash(payload)}",
+        )
+        if not data:
+            return []
+
+        out: list[tuple[str, str, str]] = []
+        blocked = {subject.casefold(), target.casefold()}
+        for item in (data.get("bridges") or [])[:limit]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            query = str(item.get("query", "")).strip()
+            # The bridge is the person between them; proposing either endpoint
+            # is a restatement of the question, and its query duplicates
+            # DIRECT_BRIDGE, which already runs on the seeds.
+            if not name or not query or name.casefold() in blocked:
+                continue
+            out.append((name, str(item.get("why", ""))[:200], query))
+        return out
+
     async def choose_frontier(
         self,
         candidates: Sequence[dict[str, Any]],

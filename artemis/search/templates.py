@@ -23,6 +23,12 @@ class QueryTemplate(str, Enum):
     #: team page, so co-listings had nothing to ground against — the roster is
     #: exactly the document where "who else is here" is written down.
     ORG_ROSTER = "org_roster"
+    #: Not rendered from a pattern. The model named a specific person or
+    #: organisation it thinks bridges toward the far endpoint, and wrote a query
+    #: to look for a page saying so. Kept distinct from the rest precisely
+    #: because it is the one query text this system does not control — the job
+    #: log shows which hits came from a guess and which from a fixed pattern.
+    HYPOTHESIS = "hypothesis"
 
 
 class StrategyAngle(str, Enum):
@@ -67,7 +73,31 @@ REQUIRED_ARGS: dict[QueryTemplate, tuple[str, ...]] = {
     QueryTemplate.DIRECT_BRIDGE: ("other_endpoint_name",),
     QueryTemplate.PAST_EMPLOYERS: (),
     QueryTemplate.ORG_ROSTER: ("employer",),
+    #: Never rendered — the model supplies the text. Listed so the mapping stays
+    #: exhaustive and render() raises rather than KeyErrors if one slips through.
+    QueryTemplate.HYPOTHESIS: (),
 }
+
+#: Longest model-written query accepted. Long enough for two names plus a
+#: qualifier, short enough that a runaway generation cannot become the query.
+MAX_HYPOTHESIS_QUERY = 160
+
+
+def sanitise_hypothesis(text: str) -> str:
+    """Make a model-written query safe to send, or return "" to drop it.
+
+    The only free text that reaches the search provider, so it is bounded rather
+    than trusted: collapsed to one line, length-capped, and stripped of the
+    operators that turn a query into a different request — `site:` and friends
+    would silently narrow every hit to a domain the model chose.
+    """
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return ""
+    lowered = cleaned.casefold()
+    if any(op in lowered for op in ("site:", "inurl:", "filetype:", "intitle:", "cache:")):
+        return ""
+    return cleaned[:MAX_HYPOTHESIS_QUERY]
 
 
 def render(

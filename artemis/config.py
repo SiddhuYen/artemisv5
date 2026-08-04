@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     verification_max_tokens: int = 4000
     strategy_enabled: bool = True
     strategy_model: str = "claude-haiku-4-5"
+    #: Named bridges proposed per expanded node, each costing one extra search.
+    #: The fixed templates still run — they are cheap, and ORG_ROSTER is the only
+    #: query shape that returns a team page, so co-listing depends on it. These
+    #: are additional: a hypothesis about who specifically might connect the two,
+    #: plus a search written to find a page saying so. 0 disables.
+    #:
+    #: The one place a model writes text that leaves this system. It cannot
+    #: create a relationship — grounding still requires a page to state it — so
+    #: a wrong guess costs one search, not a false edge.
+    bridge_hypotheses_per_node: int = 3
 
     # --- search ------------------------------------------------------------
     serper_endpoint: str = "https://google.serper.dev/search"

@@ -57,6 +57,7 @@ from artemis.graph.relations import RelationCache
 from artemis.runtime import BudgetLedger, JobLog, RunControl
 from artemis.scrape.fetcher import Fetcher
 from artemis.search.base import Query, SearchResults
+from artemis.search.templates import QueryTemplate, sanitise_hypothesis
 from artemis.search.serper import SerperProvider, SerperUnavailable
 
 
@@ -516,6 +517,46 @@ class Connector:
             )
         return ordered[:cap] or heuristic
 
+    async def _bridge_queries(self, node: Node, target: str) -> list[Query]:
+        """Ask who specifically might connect this node to the far endpoint.
+
+        The templates say "find people near this person"; this says "find a page
+        about this person and *that* one". It is a guess, and it is labelled as
+        one — QueryTemplate.HYPOTHESIS, plus a log line per bridge naming who was
+        proposed and why, so a run can be read back and the guesses judged.
+        """
+        limit = int(getattr(self.s, "bridge_hypotheses_per_node", 0) or 0)
+        if limit <= 0:
+            return []
+
+        target_node = self.store.get(self._seed_b if target == self.req.person_b
+                                     else self._seed_a) if self._seed_a else None
+        bridges = await self.claude.propose_bridges(
+            node.display_name,
+            {k: sorted(v) for k, v in node.attributes.items() if v},
+            target,
+            {k: sorted(v) for k, v in (target_node.attributes if target_node else {}).items() if v},
+            limit,
+        )
+
+        out: list[Query] = []
+        for name, why, raw in bridges:
+            rendered = sanitise_hypothesis(raw)
+            if not rendered:
+                self.log.warn("bridge.rejected", f"unusable query for {name!r}", bridge=name)
+                continue
+            self.log("bridge.proposed", f"{node.display_name} -> {name}: {why}",
+                     node_id=node.node_id, bridge=name, query=rendered)
+            out.append(
+                Query(
+                    template=QueryTemplate.HYPOTHESIS,
+                    rendered=rendered,
+                    subject_name=node.display_name,
+                    node_id=node.node_id,
+                )
+            )
+        return out
+
     def _candidate_facts(self, node_id: str) -> Optional[dict[str, Any]]:
         node = self.store.get(node_id)
         if node is None:
@@ -559,6 +600,7 @@ class Connector:
             self.log("strategy.angle", f"{node.display_name}: {angle}",
                      node_id=node_id, angle=angle, why=why)
             queries += self.policy.plan_queries(node, angle=angle)
+            queries += await self._bridge_queries(node, target)
 
         if not queries:
             return
