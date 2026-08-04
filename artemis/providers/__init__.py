@@ -47,11 +47,13 @@ from artemis.providers.opencorporates import OpenCorporatesProvider  # noqa: E40
 from artemis.providers.podcasts import PodcastProvider  # noqa: E402
 from artemis.providers.propublica import ProPublicaProvider  # noqa: E402
 from artemis.providers.rosters import RosterProvider  # noqa: E402
+from artemis.providers.wikidata import WikidataProvider  # noqa: E402
 
 
 def build_providers(settings) -> list[StructuredProvider]:  # type: ignore[no-untyped-def]
     """Every configured provider, in the order they should be consulted."""
     candidates: list[StructuredProvider] = [
+        WikidataProvider(settings),    # curated claims — highest precision, free
         RosterProvider(settings),      # org team pages — densest person-to-person source
         EdgarProvider(settings),       # SEC filings
         OpenAlexProvider(settings),    # academic co-authorship

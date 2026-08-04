@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # general web-search provider.
     rosters_enabled: bool = True
     openalex_enabled: bool = True
+    #: Curated claims, so the highest-precision index there is — but it points
+    #: at articles rather than supplying evidence. See providers/wikidata.py.
+    wikidata_enabled: bool = True
     podcasts_enabled: bool = True
     edgar_enabled: bool = True
     #: The SEC requires a User-Agent carrying real contact details.
