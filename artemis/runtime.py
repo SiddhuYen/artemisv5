@@ -174,6 +174,14 @@ class JobLog:
         level: LogLevel = LogLevel.INFO,
         **data: Any,
     ) -> None:
+        # `level` is this signature's own parameter, so a caller passing a
+        # structured field of that name — a tier number, a depth — silently
+        # lands it here and LogEntry rejects the int. That killed a run at
+        # "job.failed: ValidationError ... input_value=0" with nothing pointing
+        # at the log call that did it. Move it into data where it was meant to go.
+        if not isinstance(level, LogLevel):
+            data["level"] = level
+            level = LogLevel.INFO
         entry = LogEntry(event=event, message=message, level=level, data=data)
         if len(self.entries) < self._max:
             self.entries.append(entry)

@@ -573,7 +573,7 @@ class Connector:
         tier0.found, tier0.candidates = len(surfaced), self._tracked(ranked)
         tier0.kept, tier0.status = len(tier0.candidates), "done"
         self.log("tier.done", f"origin surfaced {tier0.found}, kept {tier0.kept}",
-                 level=0, found=tier0.found, kept=tier0.kept,
+                 tier=0, found=tier0.found, kept=tier0.kept,
                  top=[c.name for c in tier0.candidates[:3]])
         self._publish_tiers()
 
@@ -605,7 +605,7 @@ class Connector:
             tier1.kept = len(tier1.candidates)
             self._publish_tiers()
         self.log("tier.done", f"tier 1 surfaced {tier1.found}, kept {tier1.kept}",
-                 level=1, parents=len(parents), found=tier1.found, kept=tier1.kept)
+                 tier=1, parents=len(parents), found=tier1.found, kept=tier1.kept)
 
         # -- tier 2: which of them reach the target, and only those ---------
         pursued = await self._pursuable(tier1.candidates, target, pursue_allowed)
@@ -633,7 +633,7 @@ class Connector:
         tier2.found, tier2.candidates = len(reached), self._tracked(ranked)
         tier2.kept, tier2.status = len(tier2.candidates), "done"
         self.log("tier.done", f"tier 2 surfaced {tier2.found}, kept {tier2.kept}",
-                 level=2, parents=len(pursued), found=tier2.found, kept=tier2.kept)
+                 tier=2, parents=len(pursued), found=tier2.found, kept=tier2.kept)
         self._publish_tiers()
 
         # -- tier 3: the target's side, finally ------------------------------
