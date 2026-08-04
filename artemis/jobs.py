@@ -21,10 +21,11 @@ from artemis.models import (
     JobStatus,
     LogEntry,
     Result,
+    Route,
     Stats,
     utcnow,
 )
-from artemis.runtime import BudgetLedger, JobLog
+from artemis.runtime import BudgetLedger, JobLog, RunControl
 from artemis.scrape.cache import DiskCache
 from artemis.scrape.fetcher import Fetcher
 from artemis.search.serper import SerperProvider, SerperUnavailable
@@ -52,6 +53,10 @@ class InProcessJobRegistry:
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._reaper: Optional[asyncio.Task[None]] = None
+        #: Jobs asked to finish with what they have. Distinct from cancel():
+        #: the crawl stops at its next checkpoint and returns a normal result,
+        #: rather than being killed and reported FAILED.
+        self._finish_requested: set[str] = set()
         # Swept at a twentieth of the retention window, floored so tests with a
         # tiny retention still sweep and ceilinged at five minutes so a six-hour
         # retention does not mean a six-hour lag before anything is freed.
@@ -101,6 +106,20 @@ class InProcessJobRegistry:
         task.cancel()
         return True
 
+    def request_finish(self, job_id: str) -> bool:
+        """Ask a running job to stop at its next checkpoint and return.
+
+        Unlike cancel(), the job finishes normally: it keeps the routes it has
+        already found and reports DONE. Cancelling instead would mark it FAILED
+        and throw the routes away, which is the opposite of what someone
+        pressing "use this route" is asking for.
+        """
+        state = self._jobs.get(job_id)
+        if state is None or state.status in _TERMINAL:
+            return False
+        self._finish_requested.add(job_id)
+        return True
+
     def start_reaper(self) -> None:
         """Begin enforcing job_retention_s. Idempotent; needs a running loop."""
         if self._reaper is None or self._reaper.done():
@@ -138,6 +157,7 @@ class InProcessJobRegistry:
         ]
         for job_id in stale:
             self._jobs.pop(job_id, None)
+            self._finish_requested.discard(job_id)
             task = self._tasks.pop(job_id, None)
             # Retrieve the exception so dropping the Task does not trip
             # asyncio's "Task exception was never retrieved" on GC. A cancelled
@@ -182,6 +202,12 @@ class InProcessJobRegistry:
             )
             state.updated_at = utcnow()
 
+        def publish_routes(routes: list[Route]) -> None:
+            # Mid-crawl, so the console can offer the route now instead of after
+            # the remaining levels. `result` stays None until the run finishes.
+            state.preview_routes = list(routes)
+            state.updated_at = utcnow()
+
         log = JobLog(sink=sink, max_entries=self.s.max_log_entries_per_job)
         # One list, not two. Bound up front rather than only in the finally, so
         # a job that is still running is already capped instead of being trimmed
@@ -206,7 +232,11 @@ class InProcessJobRegistry:
                 self.s, self.cache, ledger, log
             ) as fetcher:
                 connector = Connector(
-                    request, self.s, provider, fetcher, claude, ledger, log
+                    request, self.s, provider, fetcher, claude, ledger, log,
+                    control=RunControl(
+                        on_routes=publish_routes,
+                        stop_requested=lambda: job_id in self._finish_requested,
+                    ),
                 )
                 holder["resolver"] = connector.resolver
                 result: Result = await asyncio.wait_for(
@@ -240,6 +270,10 @@ class InProcessJobRegistry:
         finally:
             state.log = log.entries
             state.updated_at = utcnow()
+            # The ranked result supersedes the preview. Leaving both would let
+            # the console offer "stop here" against a run that already stopped.
+            state.preview_routes = []
+            self._finish_requested.discard(job_id)
             if state.stats == Stats():
                 state.stats = ledger.snapshot()
             # Cancelling a task pins its coroutine frame — and everything local

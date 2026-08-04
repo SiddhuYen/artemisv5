@@ -50,7 +50,7 @@ from artemis.models import (
     weakest_basis,
 )
 from artemis.graph.relations import RelationCache
-from artemis.runtime import BudgetLedger, JobLog
+from artemis.runtime import BudgetLedger, JobLog, RunControl
 from artemis.scrape.fetcher import Fetcher
 from artemis.search.base import Query, SearchResults
 from artemis.search.serper import SerperProvider, SerperUnavailable
@@ -91,7 +91,17 @@ class Connector:
         log: JobLog,
         *,
         policy: Optional[ExpansionPolicy] = None,
+        control: Optional[RunControl] = None,
     ) -> None:
+        self.control = control or RunControl()
+        #: Set once seeding succeeds; the mid-level route check needs both ends
+        #: and _expand does not take them as arguments.
+        self._seed_a: Optional[str] = None
+        self._seed_b: Optional[str] = None
+        self._published: tuple[str, ...] = ()
+        #: Set by _expand when a mid-level checkpoint says stop, so _search_loop
+        #: does not start another level before noticing.
+        self._stop_mid_level = False
         self.req = request
         self.s = settings
         self.provider = provider
@@ -127,6 +137,44 @@ class Connector:
             if (budget and budget.max_depth_b is not None)
             else (request.max_depth or settings.max_depth_b)
         )
+
+    # -- early routes -------------------------------------------------------
+    async def _checkpoint(self) -> bool:
+        """Publish any route that exists yet. True means stop crawling.
+
+        Cheap until it matters: the meeting-point test is a set intersection
+        over two in-memory traversals, so this costs nothing on the overwhelming
+        majority of calls, when the frontiers have not met. Only once they have
+        does it build routes, and pivot verdicts for an unchanged pivot come
+        back from the Claude disk cache rather than the model.
+        """
+        if self._seed_a is None or self._seed_b is None:
+            return False
+        ta = traverse(self.store, self._seed_a, self.depth_a + 2)
+        tb = traverse(self.store, self._seed_b, self.depth_b + 2)
+        if not (set(ta.dist) & set(tb.dist)):
+            return self.control.should_stop()
+
+        routes = await self._build_routes(self._seed_a, self._seed_b)
+        if routes:
+            # Republishing an unchanged set would restart the console's prompt
+            # under the operator every few seconds.
+            fingerprint = tuple(
+                "|".join(h.to.node_id for h in r.hops) for r in routes
+            )
+            if fingerprint != self._published:
+                self._published = fingerprint
+                self.control.publish(routes)
+                self.log(
+                    "routes.preview",
+                    f"{len(routes)} route(s) available; still looking for a shorter one",
+                    routes=len(routes),
+                    shortest=min(r.length for r in routes),
+                )
+            if self.s.auto_stop_on_first_route:
+                self.log("routes.auto_stop", "auto_stop_on_first_route is set")
+                return True
+        return self.control.should_stop()
 
     def release(self) -> None:
         """Drop the crawl's working set once the run is over.
@@ -195,9 +243,17 @@ class Connector:
             self.warnings.append(f"no grounded mention of {missing!r} was found on any fetched page")
             return self._result(found=False)
 
-        await self._search_loop(seed_a, seed_b)
-        await self._enrich_with_providers(seed_a, seed_b)
+        self._seed_a, self._seed_b = seed_a, seed_b
+
+        stopped = await self._search_loop(seed_a, seed_b)
+        # Enrichment is another minutes-long phase. Someone who has already
+        # accepted a route is not waiting through it.
+        if not stopped:
+            await self._enrich_with_providers(seed_a, seed_b)
         routes = await self._build_routes(seed_a, seed_b)
+        if stopped:
+            self.log("run.stopped_early", f"finishing with {len(routes)} route(s)",
+                     routes=len(routes))
 
         if not routes:
             for limit in self.ledger.limits_hit:
@@ -348,7 +404,8 @@ class Connector:
         )
 
     # -- the search loop ----------------------------------------------------
-    async def _search_loop(self, seed_a: str, seed_b: str) -> None:
+    async def _search_loop(self, seed_a: str, seed_b: str) -> bool:
+        """Expand until the depth budget runs out. True if stopped early."""
         allowed_levels = max(self.depth_a, self.depth_b)
         level = 0
         bonus_used = False
@@ -357,6 +414,8 @@ class Connector:
             if self.ledger.out_of_time():
                 self.log.warn("budget", "wall clock exhausted")
                 break
+            if await self._checkpoint():
+                return True
 
             frontier: list[tuple[str, Endpoint]] = []
             ta = traverse(self.store, seed_a, self.depth_a)
@@ -382,6 +441,8 @@ class Connector:
 
             self.log("level.started", f"level {level}", frontier=len(frontier))
             await self._expand(frontier)
+            if self._stop_mid_level or await self._checkpoint():
+                return True
 
             ta = traverse(self.store, seed_a, self.depth_a + 2)
             tb = traverse(self.store, seed_b, self.depth_b + 2)
@@ -392,6 +453,7 @@ class Connector:
                 self.log("frontiers.met", f"{len(meeting)} meeting point(s)",
                          at_level=level, continuing_one_more_level=True)
             level += 1
+        return False
 
     def _frontier(self, t: Traversal, level: int, *, toward_famous: bool = True) -> list[str]:
         scored = [
@@ -671,6 +733,22 @@ class Connector:
                         source_title=page.title,
                         retrieved_at=page.retrieved_at,
                     )
+
+            # Checked here, after this page is in the graph, rather than before:
+            # the page is already fetched and extracted by this point, so
+            # stopping first would pay for it and then throw it away.
+            every = max(1, self.s.route_check_every_pages)
+            if ingested % every == 0 and await self._checkpoint():
+                self._stop_mid_level = True
+                break
+
+        if self._stop_mid_level:
+            # as_completed leaves the rest running. Cancel and await them, or
+            # they surface later as "Task exception was never retrieved" — and
+            # keep spending Claude calls on a crawl that is already finished.
+            for pending in tasks:
+                pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _is_known_person(self, name: str) -> bool:
         """Is this name already someone in the graph?

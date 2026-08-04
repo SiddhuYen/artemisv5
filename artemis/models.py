@@ -606,6 +606,9 @@ class JobState(BaseModel):
     request: ConnectRequest
     log: list[LogEntry] = Field(default_factory=list)
     result: Optional[Result] = None
+    #: Published mid-crawl so the console can offer the choice between taking
+    #: this route and waiting for a shorter one. Cleared when `result` lands.
+    preview_routes: list[Route] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     stats: Stats = Field(default_factory=Stats)
     error: Optional[str] = None
@@ -626,6 +629,9 @@ class JobView(BaseModel):
     status: JobStatus
     log: list[LogEntry]
     result: Optional[Result] = None
+    #: Routes found so far, while the crawl is still looking for a shorter one.
+    #: Empty once `result` is set — at that point the ranked set is authoritative.
+    preview_routes: list[Route] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     stats: Stats
 

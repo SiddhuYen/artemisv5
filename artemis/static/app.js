@@ -472,6 +472,7 @@ function openJob(jobId, personA, personB) {
   stopPolling();
   currentJobId = jobId;
   shownLogLines = 0;
+  previewAnswered = false;
   $('jvA').textContent = personA || '—';
   $('jvB').textContent = personB || '—';
   $('jvJobId').textContent = jobId;
@@ -577,8 +578,51 @@ async function pollJob(gen) {
   } else {
     $('jvCancelBtn').style.display = '';
     $('jvProgress').classList.add('on');
+    renderPreview(job);
     schedulePoll(POLL_MS, gen);
   }
+}
+
+// The crawl keeps expanding after the frontiers meet, looking for a shorter
+// route. That is usually right, but it can run for minutes on a route the
+// operator would already have accepted — so show it and let them decide.
+let previewAnswered = false;
+
+function renderPreview(job) {
+  const routes = (job && job.preview_routes) || [];
+  if (!routes.length) return;
+  const n = routes.length;
+  const shortest = Math.min(...routes.map(r => r.length));
+  $('jvResultLbl').textContent =
+    `// ${n} ROUTE${n === 1 ? '' : 'S'} FOUND — STILL LOOKING FOR A SHORTER ONE`;
+  const ask = previewAnswered ? '' : `
+    <div class="jv-empty" style="border:1px solid #8a6a40;padding:.75rem;margin-bottom:.75rem;">
+      // A GROUNDED ROUTE OF ${shortest} HOP${shortest === 1 ? '' : 'S'} ALREADY EXISTS.
+      <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
+        <button class="hv-btn" onclick="finishJob()">USE THIS ROUTE</button>
+        <button class="hv-btn ghost" onclick="keepSearching()">KEEP SEARCHING</button>
+      </div>
+    </div>`;
+  // Roster matching is skipped here: it is a second await against /network/match
+  // on every poll, and the ranked result does it properly once the run ends.
+  $('jvResult').innerHTML = ask + routes.map((r, i) => renderRoute(r, i, {})).join('');
+}
+
+async function finishJob() {
+  if (!currentJobId) return;
+  previewAnswered = true;
+  try {
+    await api(`/jobs/${currentJobId}/finish`, { method: 'POST' });
+    toast('Finishing with the routes found so far.');
+  } catch (e) {
+    previewAnswered = false;
+    toast('Could not finish: ' + e.message, 'err');
+  }
+}
+
+function keepSearching() {
+  previewAnswered = true;
+  toast('Still searching. The route stays on screen.');
 }
 
 function renderJobStatus(job) {

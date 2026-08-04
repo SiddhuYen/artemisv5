@@ -99,6 +99,17 @@ class Settings(BaseSettings):
     frontier_cap_per_level: int = 12
     fetch_top_n_per_node: int = 6
     max_routes_returned: int = 5
+    #: End the run the moment a route is confirmed, without being asked. Off by
+    #: default: the console surfaces a route as soon as one exists and lets the
+    #: operator decide whether a shorter one is worth waiting for. Set it for
+    #: unattended runs, where there is nobody to make that call.
+    auto_stop_on_first_route: bool = False
+    #: Pages between mid-level route checks. A level can run for minutes, so
+    #: checking only at level boundaries can sit on a route the crawl already
+    #: had — and a run that dies in that window reports found:false, which reads
+    #: exactly like "no path exists". The check is a set intersection and costs
+    #: nothing until the two frontiers have actually met.
+    route_check_every_pages: int = 10
 
     # --- structured providers ----------------------------------------------
     # URL-discovery only: they find documents the open web search misses, which

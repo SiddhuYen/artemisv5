@@ -27,6 +27,40 @@ class BudgetExceeded(RuntimeError):
 
 
 @dataclass
+class RunControl:
+    """Lets a crawl publish routes early and be stopped without being killed.
+
+    The crawl finds a route well before it finishes: the frontiers meet, then it
+    spends the rest of its depth budget looking for a shorter one. That is the
+    right default — the first path found is not usually the best — but it means
+    a run that dies in the meantime reports found:false, which reads exactly
+    like "no path exists".
+
+    So routes are published the moment they exist, and stopping is cooperative:
+    `stop_requested` is polled at the same checkpoints, and a crawl that sees it
+    returns the routes it has as a normal result. That is the difference between
+    this and cancel(), which kills the task and reports the job FAILED.
+    """
+
+    #: Called with the ranked routes each time the set changes. Must not raise.
+    on_routes: Callable[[Any], None] = lambda routes: None
+    #: Polled at every route checkpoint. True means finish now and return.
+    stop_requested: Callable[[], bool] = lambda: False
+
+    def publish(self, routes: Any) -> None:
+        try:
+            self.on_routes(routes)
+        except Exception:  # pragma: no cover - a console update is never fatal
+            pass
+
+    def should_stop(self) -> bool:
+        try:
+            return bool(self.stop_requested())
+        except Exception:  # pragma: no cover
+            return False
+
+
+@dataclass
 class BudgetLedger:
     max_serper_credits: int
     max_fetches: int

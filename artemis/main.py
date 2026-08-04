@@ -175,6 +175,7 @@ async def get_job(job_id: str) -> JobView:
         status=state.status,
         log=state.log,
         result=state.result,
+        preview_routes=state.preview_routes,
         warnings=state.warnings,
         stats=state.stats,
     )
@@ -190,6 +191,24 @@ async def get_result(job_id: str) -> Result:
     if state.result is None:
         raise HTTPException(status_code=404, detail=f"not ready (status: {state.status.value})")
     return state.result
+
+
+@app.post("/jobs/{job_id}/finish", status_code=status.HTTP_202_ACCEPTED)
+async def finish_job(job_id: str) -> dict[str, object]:
+    """Take the routes found so far and stop looking for a shorter one.
+
+    Deliberately not DELETE: that cancels, which marks the job FAILED and
+    discards the routes. This asks the crawl to stop at its next checkpoint and
+    return them as a normal result, so the answer is kept.
+    """
+    state = app.state.jobs.get(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="unknown job")
+    if not app.state.jobs.request_finish(job_id):
+        raise HTTPException(
+            status_code=409, detail=f"job is already {state.status.value}"
+        )
+    return {"accepted": True, "routes_pending": len(state.preview_routes)}
 
 
 @app.delete("/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
